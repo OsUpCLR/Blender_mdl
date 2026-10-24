@@ -1,0 +1,52 @@
+﻿name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Syntax check
+        run: |
+          python - <<'PY'
+          import io, os
+          bad = 0
+          for dp, _dn, fs in os.walk("."):
+              if ".git" in dp:
+                  continue
+              for f in fs:
+                  if f.endswith(".py"):
+                      p = os.path.join(dp, f)
+                      try:
+                          compile(io.open(p, encoding="utf-8").read(), p, "exec")
+                      except SyntaxError as e:
+                          bad += 1
+                          print(p, e)
+          raise SystemExit(1 if bad else 0)
+          PY
+
+      - name: Parser tests
+        run: python -m unittest discover -s tests -v
+
+  build:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build addon ZIP
+        run: python tools/build_zip.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SC_MODEL_IEX-zip
+          path: dist/*.zip
