@@ -34,6 +34,19 @@ Works directly with the game formats — no OBJ/FBX conversion round-trip.
 * whole model as a folder or packed `.pak`;
 * validation: **Check model** and **Round-trip** operators.
 
+**Convert from OBJ / DDS**
+
+* `OBJ -> game meshes` (`sc_model_iex.obj_to_msh`): imports `.obj`, splits the mesh
+  by material (one mesh per material, material index written to the mesh header),
+  recalculates normals and writes `.mdl-msh###` + `.mdl-hdr` using a template mesh;
+* `DDS -> .tfh/.tfd` (`sc_model_iex.dds_to_tfh`): builds an engine texture pair
+  (DXT1/DXT3/DXT5 and uncompressed DDS, full mip chain, level table identical to
+  the game), optional cubemap flag;
+* `OBJ -> game` (`sc_model_iex.obj_to_game`): full pipeline — axis normalisation,
+  scaling, split by material, `ship_hull` materials with the complete sampler set
+  (`UserParam2`, `pins`), DXT5 textures in native size, `.mdf`, `.mdl-hdr`,
+  skeleton and animations from the template, optional `.pak` build and install.
+
 ## Installation
 
 ### From a release ZIP

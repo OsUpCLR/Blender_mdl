@@ -9,6 +9,14 @@ def build_skins(base, default=True):
     return ("\n".join(lines) + "\n").encode("latin1")
 
 
+# паттерны, которым движок требует pins + UserParam2 (иначе материал «not bound»)
+SHIP_PATTERNS = {
+    "ship_hull", "ship_decals", "ship_static_decals",
+    "dyn_object_norm", "dyn_object", "dyn_animated_mock",
+    "dyn_blank_object", "blank_object",
+}
+
+
 def build_mdf(materials, tex_root=""):
     """Собрать `.mdf` из материалов Blender (минимальный, для новых моделей).
 
@@ -50,6 +58,13 @@ def build_mdf(materials, tex_root=""):
         out.append("{")
         for sampler, path in sorted(samplers.items()):
             out.append('\t%s "%s"' % (sampler, path))
+        # паттерны корабля требуют pins/UserParam2, иначе материал "not bound"
+        if name.split(".")[0] in SHIP_PATTERNS:
+            out.append("\tUserParam2_Float4 ( 1 1 0 0 )")
+            out.append("\tpins")
+            out.append("\t{")
+            out.append("\t\tUser1 1")
+            out.append("\t}")
         out.append("}")
         out.append("")
     return ("\n".join(out) + "\n").encode("latin1", "replace")

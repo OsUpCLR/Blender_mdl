@@ -92,6 +92,11 @@ def build(model):
                 struct.pack_into("<4f", out, 0x28, *thr[:4])
             else:
                 struct.pack_into("<3f", out, 0x28, *(thr + [0.0, 0.0, 0.0])[:3])
+    else:
+        # Один LOD: +0x20 и +0x28 обязаны быть НУЛЯМИ. Раньше здесь оставались
+        # значения шаблона, и движок искал несуществующие уровни — модель не рисовалась.
+        struct.pack_into("<4H", out, 0x20, 0, 0, 0, 0)
+        struct.pack_into("<3f", out, 0x28, 0.0, 0.0, 0.0)
     if "min" in model:
         struct.pack_into("<3f", out, 0, *model["min"])
     if "max" in model:

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Экспорт «с нуля» из Blender: меши (любая топология), скелет, анимации."""
 import os
+import struct
 
 import bpy
 from mathutils import Vector, Matrix
@@ -317,6 +318,14 @@ def _write_meshes(objects, tpl, base, out_dir, scale, arm, keep_normals=False,
                 tpl_i = tpl
         rec = MSH.build_mesh(tpl_i, pos, tris, nrm, uv_sets or None, bones,
                              tangents=tang)
+        # индекс материала в .mdf: берём из свойства объекта (по умолчанию 0)
+        try:
+            mi = int(obj.get("sc_material_index", 0))
+        except Exception:
+            mi = 0
+        rec = bytearray(rec)
+        struct.pack_into("<I", rec, 0x00, mi)
+        rec = bytes(rec)
         path = os.path.join(out_dir, "%s.mdl-msh%03d" % (base, i))
         with open(path, "wb") as fh:
             fh.write(rec)

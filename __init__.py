@@ -27,7 +27,7 @@ into the .blend.
 bl_info = {
     "name": "SC Model IEX",
     "author": "Star Conflict SDK",
-    "version": (0, 4, 3),
+    "version": (0, 4, 4),
     "blender": (4, 2, 0),
     "location": "File > Import > Star Conflict model",
     "description": "Star Conflict model import/export (full set: parts, decals, paints)",
@@ -64,7 +64,7 @@ LOG_NAME = "SC_MODEL_IEX_log"
 # Build tag: printed to the log first of all. Needed to see at once
 # which code version actually runs in Blender (a common trap — the add-on
 # was reinstalled, but an old module stayed in memory).
-ADDON_BUILD = "build 53 / textures are taken directly from the game .pak files (no index or unpacked folder required); portable Steam detection; bilingual FAQ; language-aware UI; collisions 2/6/7, 224"
+ADDON_BUILD = "build 57 / coincident mount bones deduplicated (one copy per head+rotation); parts placed on their own bones (each copy re-homed, rotation about bone head, no double offset); single parts path: index (parts.py canon) is primary, folder scan only as fallback; bind = translation + 3x3 rotation; textures are taken directly from the game .pak files (no index or unpacked folder required); portable Steam detection; bilingual FAQ; language-aware UI; collisions 2/6/7, 224"
 
 FAQ_TEXT = """
 SC Model IEX — frequently asked questions
@@ -3495,6 +3495,79 @@ def _report_bind_state(stem):
         LAST_BIND_NOTE = " | details with their own armature: %d" % subrig
 
 
+def _model_rel_of(base):
+    """models/ships/race_4/l/race4_l_phoenix из абсолютного пути (или '')."""
+    p = (base or "").replace("\\", "/")
+    low = p.lower()
+    i = low.rfind("/models/")
+    if i < 0:
+        return ""
+    return p[i + 1:].rsplit(".mdl-", 1)[0]
+
+
+def _rehome_parts(objs, arm_obj, from_bone, to_bone):
+    """Перевесить копию детали на СВОЮ кость: сдвиг вершин + группа + parent bone.
+
+    `_bind_rigid` вешает деталь на первую кость категории (`boost_1`), поэтому все
+    копии оказываются в одной точке. Здесь копия переезжает на `to_bone`.
+    """
+    from mathutils import Vector
+    if arm_obj is None or not from_bone or not to_bone or from_bone == to_bone:
+        return 0
+    b_from = arm_obj.data.bones.get(from_bone)
+    b_to = arm_obj.data.bones.get(to_bone)
+    if b_from is None or b_to is None:
+        return 0
+    delta = (arm_obj.matrix_world @ b_to.head_local) - (arm_obj.matrix_world @ b_from.head_local)
+    if delta.length == 0.0:
+        return 0
+    for ob in objs:
+        for vg in ob.vertex_groups:
+            vg.name = to_bone
+        if getattr(ob, "parent_type", "") == "BONE":
+            try:
+                ob.parent_bone = to_bone
+            except Exception:
+                pass
+        me = ob.data
+        for v in me.vertices:
+            v.co = v.co + delta
+        me.update()
+    return len(objs)
+
+
+def _bind_rotate(objs, rot3, scale=1.0, arm_obj=None, bone_name="", pivot=None):
+    """Повернуть вершины части вокруг точки крепления (игровой поворот `bind`).
+
+    Перенос уже сделан штатной привязкой (`_bind_rigid` сдвигает вершины к кости и
+    вешает объект на риг), поэтому здесь НЕЛЬЗЯ трогать location — иначе деталь
+    уезжает вдвое. Поворот берётся из `bind` (3×3, столбцами) и переводится в оси
+    Blender: R_b = C · R_g · C^T, C: (x,y,z) -> (-x, z, -y).
+    """
+    from mathutils import Matrix, Vector
+    C = Matrix(((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, -1.0, 0.0)))
+    Rg = Matrix(((rot3[0][0], rot3[0][1], rot3[0][2]),
+                 (rot3[1][0], rot3[1][1], rot3[1][2]),
+                 (rot3[2][0], rot3[2][1], rot3[2][2])))
+    Rb = C @ Rg @ C.transposed()
+    if abs(Rb.to_quaternion().w) > 0.999999:
+        return 0                                   # поворот единичный — не трогаем
+    if pivot is None:
+        pivot = Vector((0.0, 0.0, 0.0))
+        if arm_obj is not None and bone_name:
+            bone = arm_obj.data.bones.get(bone_name)
+            if bone is not None:
+                pivot = arm_obj.matrix_world @ bone.head_local
+    done = 0
+    for ob in objs:
+        me = ob.data
+        for v in me.vertices:
+            v.co = Rb @ (v.co - pivot) + pivot
+        me.update()
+        done += 1
+    return done
+
+
 def _import_base(context, M, MAT, TEX, base_path, scale, apply_materials,
                  axes="yup", lod=0, flip_v=True, dye_name=_L(""), dye_layer=0,
                  paint_mode="dye", decal_name=_L(""), collect_parts=True, _seen=None,
@@ -3662,13 +3735,16 @@ Check that files like <name>.mdl-msh000 and so on are located next to it.""" % b
         # the skeleton of the main model: from it we take the bone positions for the parts
         sk_info = _load_skeleton(M, base) if use_bones and _seen is None else None
         stem = os.path.basename(base)
+        use_index_parts = bool(
+            getattr(_addon_prefs(context), "parts_from_index", True)
+            and (_load_index(context) or {}).get("models"))
         try:
             candidates = M.find_models(folder)
         except Exception as exc:
             _log("[SC_MODEL_IEX] additional parts not found: %s" % exc)
             candidates = []
         covered = set()   # the categories of the parts that this ship already has
-        for cand in candidates:
+        for cand in (() if use_index_parts else candidates):
             base2 = _base_of(cand)
             if os.path.normcase(base2) in seen:
                 continue
@@ -3712,7 +3788,7 @@ Check that files like <name>.mdl-msh000 and so on are located next to it.""" % b
         # from the same folder — it lives in models_ships_race_4_l.pak.
         try:
             prefixes = _folder_prefixes(folder)
-            for cand in candidates:
+            for cand in (() if use_index_parts else candidates):
                 base2 = _base_of(cand)
                 if os.path.normcase(base2) in seen:
                     continue
@@ -3739,6 +3815,117 @@ Check that files like <name>.mdl-msh000 and so on are located next to it.""" % b
             _log("[SC_MODEL_IEX] shared class parts not added: %s" % exc)
         _log("[SC_MODEL_IEX] model total: objects %d, vertices %d, polygons %d"
               % result)
+        # --- parts from the index: the ones that live in OTHER paks (parts.py canon)
+        try:
+            if getattr(_addon_prefs(context), "parts_from_index", True):
+                from sc_tools import parts as PARTS
+                from sc_tools import skeleton as SK
+                idx = _load_index(context) or {}
+                pref2 = _addon_prefs(context)
+                data_dir = bpy.path.abspath(getattr(pref2, "game_root", "") or "")
+                cache_root = os.path.join(_texture_cache_dir(context), "_parts")
+                rel_hull = _model_rel_of(base)
+                hull_sk = _load_skeleton(M, base) if use_bones else None
+
+                def _extract(pak_name, names):
+                    pak = os.path.join(data_dir, pak_name)
+                    if not os.path.exists(pak):
+                        return {}
+                    return _pak_extract(pak, names,
+                                        os.path.join(cache_root, os.path.splitext(os.path.basename(pak_name))[0]))
+
+                if rel_hull:
+                    finder = PARTS.Finder(idx, _extract, getattr(pref2, "unpacked_root", ""))
+                    covered2 = set(covered)
+                    seen_names = {os.path.basename(_p).lower() for _p in seen}
+                    for rel, _pak, _kind in PARTS.plan(finder, rel_hull):
+                        name2 = os.path.basename(rel)
+                        if any(s in name2.lower() for s in SKIP_SIBLINGS):
+                            continue
+                        local = finder.ensure(rel, cache_root)
+                        if not local:
+                            _log("[SC_MODEL_IEX] index part without files: %s (%s)" % (name2, _pak))
+                            continue
+                        if name2.lower() in seen_names:
+                            continue
+                        if any(_o.name.lower().startswith(name2.lower() + ".mdl-msh")
+                               for _o in bpy.data.objects):
+                            continue
+                        seen_names.add(name2.lower())
+                        cat = ""
+                        try:
+                            cat = PARTS.category_from_skeleton(SK.parse_skl(local + ".mdl-skl"))
+                        except Exception:
+                            cat = ""
+                        if not cat:
+                            cat = PARTS.category_from_name(name2)
+                        if not cat or cat in covered2:
+                            continue
+                        bones = PARTS.bones_for_category(hull_sk, cat) if hull_sk else []
+                        if not bones:
+                            _log("[SC_MODEL_IEX] index part %s: no bone for category %s"
+                                 % (name2, cat))
+                            continue
+                        covered2.add(cat)
+                        covered.add(cat)
+                        # кости-разметка иногда стоят в одной точке (r1_l_engineer:
+                        # engine_1/boost_1/boost_2/capacitor_1 = (0, 0.22, 0)) —
+                        # копии в одну точку с одинаковым поворотом не нужны
+                        try:
+                            if arm_obj is not None and len(bones) > 1:
+                                _uniq, _seen_b = [], set()
+                                for _b in bones:
+                                    _bb = arm_obj.data.bones.get(_b.get("name") or "")
+                                    _off, _rot = PARTS.bind_of(_b)
+                                    _key = (tuple(round(v, 3) for v in _off),
+                                            tuple(tuple(round(v, 3) for v in r) for r in _rot))
+                                    if _bb is not None:
+                                        _h = arm_obj.matrix_world @ _bb.head_local
+                                        _key = (tuple(round(v, 3) for v in _h), _key[1])
+                                    if _key in _seen_b:
+                                        continue
+                                    _seen_b.add(_key)
+                                    _uniq.append(_b)
+                                if len(_uniq) < len(bones):
+                                    _log("[SC_MODEL_IEX] %s: кости категории %s совпадают, копий %d вместо %d"
+                                         % (name2, cat, len(_uniq), len(bones)))
+                                bones = _uniq
+                        except Exception as exc:
+                            _log("[SC_MODEL_IEX] дедупликация костей %s: %s" % (name2, exc))
+                        first_bone = (bones[0].get("name") or "") if bones else ""
+                        for _bi, bone in enumerate(bones):
+                            off, rot = PARTS.bind_of(bone)
+                            before = set(bpy.data.objects)
+                            n2, v2, t2 = _import_base(
+                                context, M, MAT, TEX, local, scale, apply_materials,
+                                axes=axes, lod=lod, flip_v=flip_v, dye_name=dye_name,
+                                dye_layer=dye_layer, paint_mode=paint_mode,
+                                decal_name=decal_name, collect_parts=False,
+                                _seen=seen, use_bones=use_bones, bone_offset=None)
+                            fresh = [o for o in bpy.data.objects
+                                     if o not in before and o.type == "MESH"]
+                            try:
+                                if _bi and fresh:
+                                    _rehome_parts(fresh, arm_obj, first_bone,
+                                                  bone.get("name") or "")
+                                _bind_rotate(fresh, rot, scale, arm_obj,
+                                             bone.get("name") or "")
+                            except Exception as exc:
+                                _log("[SC_MODEL_IEX] bind %s: %s"
+                                     % (bone.get("name"), exc))
+                            result = (result[0] + n2, result[1] + v2, result[2] + t2)
+                        # своя анимация детали — отдельный риг (как в старом проходе)
+                        try:
+                            if arm_obj is not None and _part_own_anim(context, local):
+                                _setup_part_subrig(context, local, arm_obj, sk_main,
+                                                   scale=scale, anim_fps=anim_fps,
+                                                   quat_flip=part_anim_flip)
+                        except Exception as exc:
+                            _log("[SC_MODEL_IEX] subrig for %s: %s" % (name2, exc))
+                        _log("[SC_MODEL_IEX] index part: %s (%s, bones %d)"
+                             % (name2, cat, len(bones)))
+        except Exception as exc:
+            _log("[SC_MODEL_IEX] index parts not collected: %s" % exc)
         if _seen is None:
             # the part files may have stayed in other paks — we report in which ones
             _report_missing_siblings(context, folder.lower(), stem,
@@ -4850,6 +5037,10 @@ class SC_MODEL_IEX_Prefs(bpy.types.AddonPreferences):
         subtype="DIR_PATH",
         default="",
         description=_L("Where .pak files with exported models are stored. On the first export it must be chosen"))
+    parts_from_index: BoolProperty(
+        name=_L("Parts from the index (other paks)"),
+        default=True,
+        description=_L("Take ship parts from sc_index.json so that details living in other paks are found too"))
     cache_dir: StringProperty(
         name=_L("Texture cache"),
         subtype="DIR_PATH",
@@ -5713,6 +5904,24 @@ class SC_MODEL_IEX_OT_export_all(bpy.types.Operator):
                 if self.write_anim:
                     bpy.ops.sc_model_iex.export_animation(base=base, out_dir=out)
                     done.append(".anim")
+            # без арматуры: скелет и анимации берём из шаблона (переименовывая базу)
+            if arm is None and (self.write_skl or self.write_anim) and self.template:
+                tmpl_dir = os.path.dirname(bpy.path.abspath(self.template))
+                tmpl_base = os.path.basename(self.template).split(".mdl-msh")[0]
+                if self.write_skl:
+                    src = os.path.join(tmpl_dir, tmpl_base + ".mdl-skl")
+                    if os.path.exists(src):
+                        os.makedirs(out, exist_ok=True)
+                        import shutil as _sh
+                        _sh.copy2(src, os.path.join(out, base + ".mdl-skl"))
+                        done.append(".skl(из шаблона)")
+                if self.write_anim:
+                    import glob as _glob
+                    import shutil as _sh
+                    for p in _glob.glob(os.path.join(tmpl_dir, tmpl_base + "_*.anim")):
+                        name = os.path.basename(p).replace(tmpl_base, base, 1)
+                        _sh.copy2(p, os.path.join(out, name))
+                        done.append(os.path.splitext(name)[1] + "(из шаблона)")
             if self.pack:
                 from sc_tools import pak as PAK
                 PAK.pack_dir(out, os.path.join(out, base + ".pak"))
@@ -6653,6 +6862,132 @@ class _Progress:
                 pass
             self.wm = None
 
+class SC_MODEL_IEX_OT_obj_to_game(bpy.types.Operator):
+    """Импорт OBJ-модели в игру: меши, текстуры DXT5, .mdf, .pak"""
+    bl_idname = "sc_model_iex.obj_to_game"
+    bl_label = "OBJ -> игра (модель)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filepath: bpy.props.StringProperty(name="OBJ", subtype="FILE_PATH")
+    base: bpy.props.StringProperty(name="Имя модели", default="model")
+    template_dir: bpy.props.StringProperty(name="Шаблон (папка)", subtype="DIR_PATH",
+                                           default=r"E:\SC_Unpacked\models\ships\race_3\l")
+    out_dir: bpy.props.StringProperty(name="Куда сохранить", subtype="DIR_PATH")
+    target_len: bpy.props.FloatProperty(name="Длина модели", default=5.5, min=0.1)
+    install: bpy.props.BoolProperty(name="Установить в игру", default=False)
+    game_data: bpy.props.StringProperty(name="data игры", subtype="DIR_PATH", default="")
+
+    def execute(self, context):
+        from .sc_tools import obj_pipeline as OP
+        out = bpy.path.abspath(self.out_dir) or bpy.path.abspath("//")
+        try:
+            pak = OP.obj_to_game(
+                bpy.path.abspath(self.filepath), self.base,
+                bpy.path.abspath(self.template_dir), out,
+                target_len=self.target_len,
+                install_root=(bpy.path.abspath(self.game_data) if self.install else None),
+                log=lambda m: print(m))
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "готово: %s" % pak)
+        return {"FINISHED"}
+
+
+class SC_MODEL_IEX_OT_dds_to_tfh(bpy.types.Operator):
+    """DDS -> .tfh/.tfd (формат игры)"""
+    bl_idname = "sc_model_iex.dds_to_tfh"
+    bl_label = "DDS -> .tfh/.tfd"
+    bl_options = {"REGISTER"}
+
+    filepath: bpy.props.StringProperty(name="DDS", subtype="FILE_PATH")
+    out_dir: bpy.props.StringProperty(name="Куда", subtype="DIR_PATH")
+    cube: bpy.props.BoolProperty(name="Кубическая", default=False)
+
+    def execute(self, context):
+        from .sc_tools import texture as TEX
+        src = bpy.path.abspath(self.filepath)
+        out = bpy.path.abspath(self.out_dir) or os.path.dirname(src)
+        try:
+            data = open(src, "rb").read()
+            if not data[:4] == b"DDS ":
+                raise RuntimeError("это не DDS")
+            tfh, tfd = TEX.dds_to_pair(data)
+            if self.cube:
+                import struct as _st
+                tfh = bytearray(tfh)
+                h1 = _st.unpack_from("<I", tfh, 4)[0] | (1 << 21)
+                _st.pack_into("<I", tfh, 4, h1)
+                tfh = bytes(tfh)
+            base = os.path.splitext(os.path.basename(src))[0]
+            open(os.path.join(out, base + ".tfh"), "wb").write(tfh)
+            open(os.path.join(out, base + ".tfd"), "wb").write(tfd)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "%s.tfh/.tfd готовы" % base)
+        return {"FINISHED"}
+
+
+class SC_MODEL_IEX_OT_obj_to_msh(bpy.types.Operator):
+    """OBJ -> игровые меши (.mdl-msh### + .mdl-hdr)"""
+    bl_idname = "sc_model_iex.obj_to_msh"
+    bl_label = "OBJ -> игровые меши"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filepath: bpy.props.StringProperty(name="OBJ", subtype="FILE_PATH")
+    base: bpy.props.StringProperty(name="Имя модели", default="model")
+    template: bpy.props.StringProperty(name="Шаблон .mdl-msh", subtype="FILE_PATH")
+    out_dir: bpy.props.StringProperty(name="Куда", subtype="DIR_PATH")
+
+    def execute(self, context):
+        import bmesh
+        from mathutils import Matrix
+        from .sc_tools import export_new as EX
+        from .sc_tools import hdrwrite as HW
+        try:
+            out = bpy.path.abspath(self.out_dir) or bpy.path.abspath("//")
+            os.makedirs(out, exist_ok=True)
+            before = set(bpy.data.objects)
+            bpy.ops.wm.obj_import(filepath=bpy.path.abspath(self.filepath),
+                                  forward_axis="NEGATIVE_Y", up_axis="Z")
+            new = [o for o in bpy.data.objects if o not in before and o.type == "MESH"]
+            obj = max(new, key=lambda o: len(o.data.vertices))
+            for o in new:
+                if o is not obj:
+                    bpy.data.objects.remove(o, do_unlink=True)
+            me = obj.data
+            made = []
+            for mi in range(len(me.materials)):
+                if not any(p.material_index == mi for p in me.polygons):
+                    continue
+                dup = bpy.data.objects.new("%s_%02d" % (self.base, len(made)), me.copy())
+                bpy.context.scene.collection.objects.link(dup)
+                bm = bmesh.new(); bm.from_mesh(dup.data)
+                rm = [f for f in bm.faces if f.material_index != mi]
+                bmesh.ops.delete(bm, geom=rm, context="FACES")
+                bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+                bm.to_mesh(dup.data); bm.free(); dup.data.update()
+                dup["sc_material_index"] = len(made)
+                made.append(dup)
+            bpy.data.objects.remove(obj, do_unlink=True)
+            if not made:
+                raise RuntimeError("нет материалов с гранями")
+            EX.export_meshes(made, self.base, out, bpy.path.abspath(self.template),
+                             scale=1.0, arm=None)
+            meshes = sorted(f for f in os.listdir(out) if f.startswith(self.base + ".mdl-msh"))
+            hdr = HW.build_hdr([os.path.join(out, f) for f in meshes],
+                               template=bpy.path.abspath(self.template).replace(
+                                   ".mdl-msh001", ".mdl-hdr") if False else None,
+                               material_count=len(made), mesh_count=len(meshes))
+            open(os.path.join(out, self.base + ".mdl-hdr"), "wb").write(hdr)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "%d мешей + hdr готовы" % len(meshes))
+        return {"FINISHED"}
+
+
 CLASSES = (SC_MODEL_IEX_OT_import_model, SC_MODEL_IEX_OT_import_batch,
            SC_MODEL_IEX_OT_import_mdp, SC_MODEL_IEX_OT_mdp_scale,
            SC_MODEL_IEX_OT_import_pak, SC_MODEL_IEX_OT_import_anim,
@@ -6665,9 +7000,7 @@ CLASSES = (SC_MODEL_IEX_OT_import_model, SC_MODEL_IEX_OT_import_batch,
            SC_MODEL_IEX_OT_export_all,
            SC_MODEL_IEX_OT_export_model, SC_MODEL_IEX_OT_pick_export_dir,
            SC_MODEL_IEX_OT_game_lighting, SC_MODEL_IEX_OT_show_faq,
-           SC_MODEL_IEX_OT_reload_tools, SC_MODEL_IEX_Prefs)
-
-
+           SC_MODEL_IEX_OT_reload_tools, SC_MODEL_IEX_Prefs, SC_MODEL_IEX_OT_obj_to_game, SC_MODEL_IEX_OT_dds_to_tfh, SC_MODEL_IEX_OT_obj_to_msh)
 def register():
     _check_blender_version()
     for cls in CLASSES:

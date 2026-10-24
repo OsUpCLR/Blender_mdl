@@ -44,7 +44,9 @@ import struct
 from . import model as M
 
 HEADER = M.MSH_HEADER          # 68
-OPAQUE_OFFSETS = (0x14, 0x18, 0x1C, 0x20, 0x24)
+# 0x18 — это ДУБЛЬ n_idx (проверено на всех мешах игры), поэтому он не «непрозрачный»:
+# раньше он восстанавливался из шаблона и ломал чтение индексов у новых мешей.
+OPAQUE_OFFSETS = (0x14, 0x1C, 0x20, 0x24)
 
 
 DEFAULT_HEADERS = {
@@ -108,6 +110,9 @@ def header_bytes(info, opaque=None):
     struct.pack_into("<I", h, 0x08, info["stride"])
     struct.pack_into("<I", h, 0x0C, info["n_vtx"])
     struct.pack_into("<I", h, 0x10, info["n_idx"])
+    struct.pack_into("<I", h, 0x18, info["n_idx"])          # дубль n_idx, не из шаблона
+    if "material" in info:
+        struct.pack_into("<I", h, 0x00, int(info["material"]))   # индекс материала в .mdf
     src = opaque if opaque is not None else opaque_fields(info)
     for off, val in src.items():
         struct.pack_into("<I", h, off, val)
