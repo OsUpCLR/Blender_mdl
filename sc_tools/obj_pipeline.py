@@ -29,6 +29,13 @@ except Exception:                     # нет энкодера — тексту
 
 REL = "models/ships/race_3/l"
 PATTERN = "ship_hull"
+GLASS_BLOCK = (
+    "material dyn_glass\n{\n"
+    "\tUserParam0_Float4 ( %.3f %.3f %.3f )\n"
+    "\tUserParam0_Float  ( %.2f %.2f 0 0 )\n"
+    "\tUserParam1_Float4 ( 0.000611 0.00228 0.00901 )\n"
+    "}")
+GLASS_DEFAULT = (0.60, 0.66, 0.72, 0.50, 1.00)
 SAMPLERS_FULL = True
 
 
@@ -171,7 +178,8 @@ def obj_to_game(obj_path, base, template_dir, out_dir, target_len=5.5,
         dup.data.materials.append(m)
         for p in dup.data.polygons:
             p.material_index = 0
-        made.append({"obj": dup, "jpg": _jpg_of(mat, src_dir)})
+        made.append({"obj": dup, "jpg": _jpg_of(mat, src_dir),
+                     "glass": ("glass" in (mat.name if mat else "").lower())})
         # 5) разворот 180° (как в игре)
         bpy.context.view_layer.objects.active = dup
         dup.select_set(True)
@@ -210,8 +218,11 @@ def obj_to_game(obj_path, base, template_dir, out_dir, target_len=5.5,
                     '\tSpecularColorSampler "%s\\%s_msk_sc"\n'
                     % ((REL.replace("/", "\\"), base) + (REL.replace("/", "\\"), tex) * 2
                        + (REL.replace("/", "\\"), tpl_base) * 2))
-        blocks.append('material %s\n{\n%s\tUserParam2_Float4 ( 1 1 0 0 )\n'
-                      '\tpins\n\t{\n\t\tUser1 1\n\t}\n}' % (PATTERN, body))
+        if m.get("glass"):
+            blocks.append(GLASS_BLOCK % GLASS_DEFAULT)
+        else:
+            blocks.append('material %s\n{\n%s\tUserParam2_Float4 ( 1 1 0 0 )\n'
+                          '\tpins\n\t{\n\t\tUser1 1\n\t}\n}' % (PATTERN, body))
     # чёрная маска покраски
     import numpy as np
     mask = (64, 64, np.zeros((64, 64, 4), dtype=np.uint8).tobytes())

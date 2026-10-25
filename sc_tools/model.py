@@ -488,81 +488,32 @@ def _bbox_of_path(mp):
 
 
 def lod_groups(base, verify=True):
-    """
-    Разбиение мешей модели по уровням детализации.
+    """Разбиение мешей модели по уровням детализации — по спеке формата.
 
-    ВАЖНО: .mdl-msh### — это не «части» корабля, а УРОВНИ ДЕТАЛИЗАЦИИ.
-    Каждый LOD содержит по одному мешу на материал, материалы внутри LOD
-    не повторяются. Поэтому новый LOD начинается там, где индекс материала
-    встречается второй раз.
-
-    verify=True — дополнительная страховка: если габариты групп расходятся
-    (значит это не LOD, а разные детали), возвращаем одну общую группу,
-    чтобы не потерять геометрию.
+    `.mdl-hdr` +0x20: четыре u16, где lod[k] = ИНДЕКС ПОСЛЕДНЕЙ детали уровня k
+    (включительно), уровни вложенные:
+        LOD0 = детали 0..lod[0], LOD1 = 0..lod[1], ...
+    Все нули — один LOD. Если lod[0] < parts-1, детали после lod[0] —
+    всегда рисуемые attachments (они попадают в каждую группу).
 
     Возвращает [[путь, ...], ...] — группы от самого детального уровня.
     """
     paths = mesh_files(base)
-    # Основной источник — .mdl-hdr (+0x20): 4×u16 внутренних стартов LOD,
-    # проверено на 3046/3046 моделях игры. Эвристика по материалам остаётся
-    # запасным вариантом, если заголовка нет.
     hdr = base + ".mdl-hdr"
-    if os.path.exists(hdr):
-        try:
-            from . import hdrwrite as HW
-            starts = [s for s in HW.lod_starts(open(hdr, "rb").read()) if s < len(paths)]
-            if starts and starts[0] == 0:
-                return [paths[s:e] for s, e in
-                        zip(starts, starts[1:] + [len(paths)])]
-        except Exception:
-            pass
-    groups = []
-    cur = []
-    seen = set()
-    for p in paths:
-        try:
-            mat = matmod.material_index(p)
-        except Exception:
-            mat = len(seen)
-        if mat in seen:
-            groups.append(cur)
-            cur = []
-            seen = set()
-        cur.append(p)
-        seen.add(mat)
-    if cur:
-        groups.append(cur)
-
-    if verify and len(groups) > 1:
-        def union(gs):
-            bb = None
-            for p in gs:
-                b = _bbox_of_path(p)
-                if b is None:
-                    continue
-                bb = b if bb is None else (min(bb[0], b[0]), min(bb[1], b[1]),
-                                           min(bb[2], b[2]), max(bb[3], b[3]),
-                                           max(bb[4], b[4]), max(bb[5], b[5]))
-            return bb
-
-        b0 = union(groups[0])
-        if b0 is not None:
-            scale = max(1.0, max(abs(v) for v in b0))
-            tol = 0.15 * scale
-            for g in groups[1:]:
-                bg = union(g)
-                if bg is None:
-                    continue
-                # уровень детализации лежит ВНУТРИ габарита первого уровня;
-                # если группа выходит за него — это отдельная деталь, а не LOD
-                inside = (bg[0] >= b0[0] - tol and bg[1] >= b0[1] - tol and
-                          bg[2] >= b0[2] - tol and bg[3] <= b0[3] + tol and
-                          bg[4] <= b0[4] + tol and bg[5] <= b0[5] + tol)
-                if not inside:
-                    return [paths]
+    if not os.path.exists(hdr):
+        return [paths]
+    try:
+        raw = open(hdr, "rb").read()
+        vals = list(struct.unpack_from("<4H", raw, 0x20))
+    except Exception:
+        return [paths]
+    last = [v for v in vals if 0 < v < len(paths)]
+    if not last:
+        return [paths]                     # один LOD
+    if last != sorted(last, reverse=True):
+        return [paths]                     # не монотонно — считаем одним LOD
+    groups = [paths[:v + 1] for v in last]
     return groups
-
-
 def compose_paint(tex_dir, mats, paint, tex_index=None):
     """
     Покраска корпуса: `_s1` (маска слоёв) x цвета красителей -> «покрашенные» текстуры.
@@ -1039,3 +990,52 @@ def _main():
 
 if __name__ == "__main__":
     _main()
+
+
+FVF_STRIDE = {0x09: 24, 0x0B: 24, 0x0C: 28, 0x0E: 28, 0x11: 28, 0x14: 32,
+              0x15: 36, 0x16: 44, 0x1B: 36, 0x1C: 40, 0x03: 48}
+
+
+def check_counts(base):
+    """Проверка пакета модели по спеке формата.
+
+    Возвращает (ok, [сообщения]). Проверяется:
+      * parts из +0x38 == числу файлов .mdl-msh###;
+      * materials из +0x38 == числу блоков material в .mdf;
+      * у каждой детали FVF (+0x04) соответствует страйду (+0x08) по таблице.
+    """
+    import struct as _st
+    msgs = []
+    ok = True
+    hdr = base + ".mdl-hdr"
+    if not os.path.exists(hdr):
+        return False, ["нет .mdl-hdr"]
+    raw = open(hdr, "rb").read()
+    packed = _st.unpack_from("<I", raw, 0x38)[0]
+    parts, mats = packed & 0xFFFF, packed >> 16
+    files = mesh_files(base)
+    if parts != len(files):
+        ok = False
+        msgs.append("parts=%d, файлов .mdl-msh=%d" % (parts, len(files)))
+    mdf = base + ".mdf"
+    if os.path.exists(mdf):
+        try:
+            txt = open(mdf, "rb").read().decode("latin1", "replace")
+            nmat = txt.count("material ")
+            if nmat != mats:
+                ok = False
+                msgs.append("materials=%d, блоков в .mdf=%d" % (mats, nmat))
+        except Exception as exc:
+            msgs.append("mdf: %s" % exc)
+    for path in files:
+        try:
+            head = open(path, "rb").read(0x44)
+            fvf, stride = _st.unpack_from("<II", head, 0x04)
+            want = FVF_STRIDE.get(fvf)
+            if want is not None and want != stride:
+                ok = False
+                msgs.append("%s: FVF 0x%X должен быть stride %d, а стоит %d"
+                            % (os.path.basename(path), fvf, want, stride))
+        except Exception as exc:
+            msgs.append("%s: %s" % (os.path.basename(path), exc))
+    return ok, msgs

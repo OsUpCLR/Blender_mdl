@@ -232,6 +232,18 @@ def _write_meshes(objects, tpl, base, out_dir, scale, arm, keep_normals=False,
         me = obj.data
         me.calc_loop_triangles()
         mw = obj.matrix_world
+        # «визуальный» поворот (оператор rotate_selected): при экспорте отменяем,
+        # иначе он запечётся в игру и модель ляжет на бок там
+        _inv = obj.get("sc_orient_inv") or (obj.parent.get("sc_orient_inv")
+                                            if obj.parent else None)
+        if _inv and len(_inv) == 9:
+            try:
+                mw = Matrix((( _inv[0], _inv[1], _inv[2], 0.0),
+                             ( _inv[3], _inv[4], _inv[5], 0.0),
+                             ( _inv[6], _inv[7], _inv[8], 0.0),
+                             ( 0.0, 0.0, 0.0, 1.0))) @ mw
+            except Exception:
+                pass
         ident = (mw == Matrix.Identity(4))
         nmat = mw.to_3x3().inverted().transposed()
         uv_sets = []

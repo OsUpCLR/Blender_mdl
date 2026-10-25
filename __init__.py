@@ -153,9 +153,28 @@ _MESH_BONE_IDX = {}
 _MESH_INFLUENCES = {}
 
 
+_LOG_FILE = os.path.join(tempfile.gettempdir(), "SC_MODEL_IEX_log.txt")
+
+
+def _log_to_file(msg):
+    """Дублировать строку лога в файл — чтобы диагностировать падения без Blender."""
+    global _LOG_FILE
+    try:
+        if not _LOG_FILE:
+            return
+        with open(_LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(str(msg) + "\n")
+    except Exception:
+        pass
+
+
 def _log(text):
     "Write to the console AND to the SC_MODEL_IEX_log text block (visible in the Text Editor)."
     print(text)
+    try:
+        _log_to_file(text)
+    except Exception:
+        pass
     try:
         txt = bpy.data.texts.get(LOG_NAME)
         if txt is None:
@@ -167,6 +186,11 @@ def _log(text):
 
 def _log_reset():
     "Clear the log before a new import."
+    try:
+        if _LOG_FILE and os.path.exists(_LOG_FILE):
+            os.remove(_LOG_FILE)
+    except Exception:
+        pass
     _MESH_BONE_IDX.clear()
     _MESH_INFLUENCES.clear()
     print("[SC_MODEL_IEX] add-on build: %s" % ADDON_BUILD)
@@ -3201,6 +3225,80 @@ def _shift_parts(sk_info, stem, enabled=True, offsets=None, folder=None):
     return moved
 
 
+def _place_part_at_bone(obj, arm_obj, bone_name):
+    """Поставить деталь в точку крепления (bind-матрица кости).
+
+    Детали авторы лежат вокруг своего нуля (их локальные координаты = пространство
+    кости-крепежа), поэтому после привязки к кости их надо перенести в её rest-матрицу.
+    Если геометрия уже в мировых координатах корабля — не трогаем.
+    """
+    from mathutils import Vector
+    if obj.get("sc_model_iex_placed"):
+        return False
+    bone = arm_obj.data.bones.get(bone_name) if bone_name else None
+    if bone is None:
+        return False
+    pts = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+    cx = sum(p.x for p in pts) / len(pts)
+    cy = sum(p.y for p in pts) / len(pts)
+    cz = sum(p.z for p in pts) / len(pts)
+    if (cx * cx + cy * cy + cz * cz) ** 0.5 > 2.0:
+        _log("[SC_MODEL_IEX] part %s: геометрия уже в мировых координатах" % obj.name)
+        return False
+    obj.matrix_world = arm_obj.matrix_world @ bone.matrix_local
+    obj["sc_model_iex_placed"] = True
+    _log("[SC_MODEL_IEX] part %s: поставлена на кость %s (%.2f, %.2f, %.2f)"
+         % (obj.name, bone.name, bone.head_local.x, bone.head_local.y, bone.head_local.z))
+    return True
+
+
+def _spread_parts(arm_obj, bound):
+    """Размножить деталь по всем костям её категории (boost_1..N, engine_1..N).
+
+    В модели корабля может быть несколько точек крепления одной категории
+    (например boost_1, boost_2, boost_3), а файл детали — один. Каждая копия
+    ставится в свою кость и привязывается к ней.
+    """
+    import re
+    by_stem = {}
+    for name, bone_name in list(bound.items()):
+        stem = name.split(".mdl-msh")[0]
+        by_stem.setdefault(stem, []).append((name, bone_name))
+    added = 0
+    for stem, items in by_stem.items():
+        first = items[0][1]
+        m = re.match(r"([A-Za-z_]+?)_?(\d+)$", first or "")
+        if not m:
+            continue
+        cat = m.group(1)
+        pattern = re.compile(r"^%s_?\d+$" % re.escape(cat), re.I)
+        targets = [b.name for b in arm_obj.data.bones if pattern.match(b.name)]
+        if len(targets) < 2:
+            continue
+        for tgt in targets[1:]:
+            bone = arm_obj.data.bones.get(tgt)
+            if bone is None:
+                continue
+            for name, _b in items:
+                src = bpy.data.objects.get(name)
+                if src is None:
+                    continue
+                dup = src.copy()
+                dup.data = src.data.copy()
+                dup.name = "%s_%s" % (name, tgt)
+                bpy.context.scene.collection.objects.link(dup)
+                dup.matrix_world = arm_obj.matrix_world @ bone.matrix_local
+                for g in list(dup.vertex_groups):
+                    if re.match(r"^%s_?\d+$" % re.escape(cat), g.name, re.I):
+                        g.name = tgt
+                dup["sc_model_iex_bone"] = tgt
+                dup["sc_model_iex_placed"] = True
+                added += 1
+        _log("[SC_MODEL_IEX] деталь %s размножена на %d точек крепления"
+             % (stem, len(targets)))
+    return added
+
+
 def _bind_rigid(context, arm_obj, stem, sk_info, folder=None):
     """Rigid binding of a part to a bone — via a vertex group, NOT via BONE parenting.
 
@@ -3253,7 +3351,25 @@ def _bind_rigid(context, arm_obj, stem, sk_info, folder=None):
             # either a part without binding (__World__), or the bone was not found
             bone = main_bone
         if bone is None or bone.get("name") not in arm_obj.data.bones:
-            continue
+            # Детали из чужих паков: нужной кости может не быть в скелете корабля.
+            # Раньше такая деталь оставалась без привязки и лежала рядом с кораблём;
+            # теперь сажаем её на root (или на первую кость), чтобы она двигалась
+            # вместе с корпусом.
+            alt = next((b for b in bones
+                        if (b.get("name") or "").lower() == "root"), None)
+            if alt is None and bones:
+                alt = bones[0]
+            if alt is None or alt.get("name") not in arm_obj.data.bones:
+                _log("[SC_MODEL_IEX] part %s: подходящей кости нет — пропуск" % obj.name)
+                continue
+            _log("[SC_MODEL_IEX] part %s: фолбэк на кость %s"
+                 % (obj.name, alt.get("name")))
+            bone = alt
+        try:
+            _place_part_at_bone(obj, arm_obj, bone.get("name"))
+        except Exception as exc:
+            _log("[SC_MODEL_IEX] part %s: не удалось поставить на кость: %s"
+                 % (obj.name, exc))
         bound[obj.name] = bone.get("name")
         _log("[SC_MODEL_IEX] part %s: root %r -> category %r -> bone %s"
              % (obj.name, _part_root_name(part_sk), category or "—",
@@ -3280,6 +3396,10 @@ def _bind_rigid(context, arm_obj, stem, sk_info, folder=None):
             obj.matrix_world = world
         made += 1
     _log("[SC_MODEL_IEX] rigid binding (vertex group): objects %d" % made)
+    try:
+        _spread_parts(arm_obj, bound)
+    except Exception as exc:
+        _log("[SC_MODEL_IEX] размножение деталей не удалось: %s" % exc)
     return made
 
 
@@ -3566,6 +3686,86 @@ def _bind_rotate(objs, rot3, scale=1.0, arm_obj=None, bone_name="", pivot=None):
         me.update()
         done += 1
     return done
+
+
+def _auto_forward(arm_obj=None):
+    """Проверить «перед» модели по костям и развернуть, если она летит спиной.
+
+    Соглашение игры: +X вправо, +Y вверх, -Z вперёд (нос), +Z назад (двигатели).
+    В Blender: game Z = -Blender Y. Значит выхлопы/двигатели должны иметь
+    БОЛЬШИЙ Blender Y, чем курсовые пушки. Если наоборот — модель развёрнута
+    на 180°, и это лечится поворотом вокруг вертикали (Blender Z).
+    Возвращает True, если повернули.
+    """
+    import math
+    from mathutils import Matrix
+    if arm_obj is None:
+        return False
+    rear_names = ("engine", "boost", "exhaust", "thruster", "nozzle")
+    front_names = ("gun", "weapon", "cannon", "laser", "rocket")
+    rear, front = [], []
+    for b in arm_obj.data.bones:
+        low = (b.name or "").lower()
+        y_bl = (arm_obj.matrix_world @ b.head_local).y
+        if any(low.startswith(n) or ("_" + n) in low for n in rear_names):
+            rear.append(y_bl)
+        elif any(low.startswith(n) or ("_" + n) in low for n in front_names):
+            front.append(y_bl)
+    if len(rear) < 1 or len(front) < 1:
+        _log("[SC_MODEL_IEX] auto forward: не нашёл кости двигателей/орудий — пропуск")
+        return False
+    r = sum(rear) / len(rear)
+    f = sum(front) / len(front)
+    _log("[SC_MODEL_IEX] auto forward: двигатели Y=%.2f, пушки Y=%.2f" % (r, f))
+    # game +Z (хвост) -> Blender -Y: у ПРАВИЛЬНОЙ модели двигатели имеют
+    # МЕНЬШИЙ Blender Y, чем курсовые пушки.
+    if r <= f:
+        return False                       # двигатели сзади — всё верно
+    R = Matrix.Rotation(math.radians(180), 4, "Z")
+    arm_obj.matrix_world = R @ arm_obj.matrix_world
+    for o in bpy.context.scene.objects:
+        if o.type == "MESH" and o.parent == arm_obj:
+            o.matrix_world = R @ o.matrix_world
+    _log("[SC_MODEL_IEX] auto forward: модель была развёрнута — поворот 180° вокруг Z")
+    return True
+
+
+def _auto_orient(objs, arm_obj=None):
+    """Повернуть модель, если её длинная ось не лежит по Y (Blender).
+
+    Часть моделей (пропсы, станции, отдельные корабли) свёрстана не Y-up, и после
+    импорта ложится на бок. Длину определяем по общему bbox.
+    """
+    import math
+    from mathutils import Matrix, Vector
+    objs = [o for o in (objs or []) if o is not None and o.name in bpy.data.objects]
+    if not objs and arm_obj is None:
+        return None
+    pts = []
+    for o in objs:
+        pts += [o.matrix_world @ Vector(c) for c in o.bound_box]
+    if not pts:
+        return None
+    xs = [p.x for p in pts]; ys = [p.y for p in pts]; zs = [p.z for p in pts]
+    size = (max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+    # Осторожная эвристика: у высоких объектов (башни, мачты) длинная ось — Y,
+    # и это нормально. Поворачиваем только при ЯВНОМ перевесе другой оси.
+    LIMIT = 1.35
+    if size[1] * LIMIT >= max(size[0], size[2]):
+        return None                      # длина по Y или габариты близки — не трогаем
+    rot = None
+    if size[2] >= size[0] * LIMIT and size[2] >= size[1] * LIMIT:
+        rot = Matrix.Rotation(math.radians(-90), 4, "X")   # явно стоял на хвосте
+        what = "X -90"
+    elif size[0] >= size[1] * LIMIT and size[0] >= size[2] * LIMIT:
+        rot = Matrix.Rotation(math.radians(90), 4, "Z")    # явно лежал на боку
+        what = "Z +90"
+    else:
+        return None
+    target = arm_obj if arm_obj is not None else objs[0]
+    target.matrix_world = rot @ target.matrix_world
+    _log("[SC_MODEL_IEX] auto axes: поворот %s (модель была не Y-up)" % what)
+    return what
 
 
 def _import_base(context, M, MAT, TEX, base_path, scale, apply_materials,
@@ -4023,6 +4223,12 @@ Check that files like <name>.mdl-msh000 and so on are located next to it.""" % b
         LAST_PREFER_ARM = all_anims
         if all_anims and arm_obj is not None:
             _log("[SC_MODEL_IEX] animations live on armature %s — they must be switched in the Action Editor with that armature active" % arm_obj.name)
+    if str(axes) == "auto":
+        try:
+            if not _auto_forward(locals().get("arm_obj")):
+                _auto_orient(locals().get("objs"), locals().get("arm_obj"))
+        except Exception as exc:
+            _log("[SC_MODEL_IEX] auto axes failed: %s" % exc)
     return result
 
 
@@ -4056,7 +4262,8 @@ class SC_MODEL_IEX_OT_import_model(bpy.types.Operator, ImportHelper):
         description=_L("For .pak: e.g. models\\ships\\race_1\\s\\r1_s_t1"))
     axes: EnumProperty(
         name=_L("Orientation"),
-        items=(("yup", _L("Y-up -> Z-up (as in the game, correct)"), ""),
+        items=(("auto", _L("Auto (rotate if the long axis is not Y)"), ""),
+               ("yup", _L("Y-up -> Z-up (as in the game, correct)"), ""),
                ("raw", _L("No conversion (as in the file)"), "")),
         default="yup")
     lod: bpy.props.IntProperty(
@@ -4268,7 +4475,8 @@ class SC_MODEL_IEX_OT_import_pak(bpy.types.Operator, ImportHelper):
                           description=_L("For example models\\ships\\race_1\\s\\r1_s_t1"))
     axes: EnumProperty(
         name=_L("Orientation"),
-        items=(("yup", _L("Y-up -> Z-up (as in the game, correct)"), ""),
+        items=(("auto", _L("Auto (rotate if the long axis is not Y)"), ""),
+               ("yup", _L("Y-up -> Z-up (as in the game, correct)"), ""),
                ("raw", _L("No conversion (as in the file)"), "")),
         default="yup")
     lod: bpy.props.IntProperty(
@@ -4379,7 +4587,17 @@ class SC_MODEL_IEX_OT_import_pak(bpy.types.Operator, ImportHelper):
             pak_name = os.path.splitext(os.path.basename(self.filepath))[0]
             work = os.path.join(_texture_cache_dir(context), "pak_" + pak_name)
             marker = os.path.join(work, ".unpacked")
-            if not os.path.exists(marker):
+            # Маркер распаковки может остаться от прошлого раза, а кэш — быть
+            # очищенным. Тогда моделей не находится; проверяем содержимое.
+            need_unpack = not os.path.exists(marker)
+            if not need_unpack and not _walk_mdl_hdr(work):
+                _log("[SC_MODEL_IEX] кэш пака пуст (%s) — распаковываю заново" % work)
+                try:
+                    os.remove(marker)
+                except Exception:
+                    pass
+                need_unpack = True
+            if need_unpack:
                 os.makedirs(work, exist_ok=True)
                 _log("[SC_MODEL_IEX] unpacking pak %s -> %s" % (pak_name, work))
                 P.unpack_file(self.filepath, work)
@@ -4403,7 +4621,20 @@ class SC_MODEL_IEX_OT_import_pak(bpy.types.Operator, ImportHelper):
             if not base:
                 models = M.find_models(work)
                 if not models:
-                    raise RuntimeError("no models found in the pak")
+                    # понятная диагностика: что вообще лежит в паке
+                    kinds = {}
+                    for _dp, _dirs, _files in os.walk(work):
+                        for _f in _files:
+                            _e = os.path.splitext(_f)[1].lower() or "?"
+                            kinds[_e] = kinds.get(_e, 0) + 1
+                    total = sum(kinds.values())
+                    top = ", ".join("%s: %d" % (k, v) for k, v in
+                                    sorted(kinds.items(), key=lambda kv: -kv[1])[:5])
+                    raise RuntimeError(
+                        "в паке нет моделей (.mdl-hdr): файлов %d, из них %s. "
+                        "Похоже, это пак текстур или частей, а не пак с моделью "
+                        "корабля — выберите другой пак."
+                        % (total, top or "нет файлов"))
                 base = models[0]
                 _log("[SC_MODEL_IEX] model not specified, took the first one: %s" % base)
             if self.parts_mode != "only" and self.foreign_parts == "load":
@@ -6976,15 +7207,69 @@ class SC_MODEL_IEX_OT_obj_to_msh(bpy.types.Operator):
             EX.export_meshes(made, self.base, out, bpy.path.abspath(self.template),
                              scale=1.0, arm=None)
             meshes = sorted(f for f in os.listdir(out) if f.startswith(self.base + ".mdl-msh"))
+            tpl_hdr = bpy.path.abspath(self.template).replace(".mdl-msh001", ".mdl-hdr")
             hdr = HW.build_hdr([os.path.join(out, f) for f in meshes],
-                               template=bpy.path.abspath(self.template).replace(
-                                   ".mdl-msh001", ".mdl-hdr") if False else None,
+                               template=tpl_hdr if os.path.exists(tpl_hdr) else None,
                                material_count=len(made), mesh_count=len(meshes))
             open(os.path.join(out, self.base + ".mdl-hdr"), "wb").write(hdr)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         self.report({"INFO"}, "%d мешей + hdr готовы" % len(meshes))
+        return {"FINISHED"}
+
+
+class SC_MODEL_IEX_OT_rotate_selected(bpy.types.Operator):
+    """Повернуть выделенное для просмотра; при экспорте поворот отменяется"""
+    bl_idname = "sc_model_iex.rotate_selected"
+    bl_label = "Повернуть выделенное (визуально)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    axis: bpy.props.EnumProperty(
+        name="Поворот",
+        items=(("x-90", "X -90 (положить на бок)", ""),
+               ("x90", "X +90", ""),
+               ("z90", "Z +90 (развернуть)", ""),
+               ("z-90", "Z -90", ""),
+               ("y180", "Y 180 (перевернуть)", "")))
+    reset: bpy.props.BoolProperty(name="Сбросить поворот", default=False)
+
+    def execute(self, context):
+        import math
+        from mathutils import Matrix
+        angles = {"x-90": (math.radians(-90), "X"), "x90": (math.radians(90), "X"),
+                  "z90": (math.radians(90), "Z"), "z-90": (math.radians(-90), "Z"),
+                  "y180": (math.radians(180), "Y")}
+        objs = [o for o in context.selected_objects
+                if o.type in ("MESH", "ARMATURE", "EMPTY")]
+        if not objs:
+            self.report({"ERROR"}, "ничего не выделено")
+            return {"CANCELLED"}
+        if self.reset:
+            for o in objs:
+                for key in ("sc_orient_inv",):
+                    if key in o:
+                        del o[key]
+            self.report({"INFO"}, "метки поворота сброшены (сам поворот — вручную Ctrl+Z)")
+            return {"FINISHED"}
+        ang, ax = angles[self.axis]
+        R = Matrix.Rotation(ang, 4, ax)
+        Ri = R.inverted()
+        inv9 = [Ri[r][c] for r in range(3) for c in range(3)]
+        for o in objs:
+            o.matrix_world = R @ o.matrix_world
+            prev = o.get("sc_orient_inv")
+            if prev and len(prev) == 9:
+                P = Matrix(((prev[0], prev[1], prev[2], 0.0),
+                            (prev[3], prev[4], prev[5], 0.0),
+                            (prev[6], prev[7], prev[8], 0.0),
+                            (0.0, 0.0, 0.0, 1.0)))
+                M = Ri @ P
+                o["sc_orient_inv"] = [M[r][c] for r in range(3) for c in range(3)]
+            else:
+                o["sc_orient_inv"] = inv9
+        context.view_layer.update()
+        self.report({"INFO"}, "повёрнуто %s (при экспорте отменится)" % self.axis)
         return {"FINISHED"}
 
 
@@ -7000,7 +7285,7 @@ CLASSES = (SC_MODEL_IEX_OT_import_model, SC_MODEL_IEX_OT_import_batch,
            SC_MODEL_IEX_OT_export_all,
            SC_MODEL_IEX_OT_export_model, SC_MODEL_IEX_OT_pick_export_dir,
            SC_MODEL_IEX_OT_game_lighting, SC_MODEL_IEX_OT_show_faq,
-           SC_MODEL_IEX_OT_reload_tools, SC_MODEL_IEX_Prefs, SC_MODEL_IEX_OT_obj_to_game, SC_MODEL_IEX_OT_dds_to_tfh, SC_MODEL_IEX_OT_obj_to_msh)
+           SC_MODEL_IEX_OT_reload_tools, SC_MODEL_IEX_Prefs, SC_MODEL_IEX_OT_obj_to_game, SC_MODEL_IEX_OT_dds_to_tfh, SC_MODEL_IEX_OT_obj_to_msh, SC_MODEL_IEX_OT_rotate_selected)
 def register():
     _check_blender_version()
     for cls in CLASSES:
