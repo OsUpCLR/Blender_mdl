@@ -27,7 +27,7 @@ into the .blend.
 bl_info = {
     "name": "SC Model IEX",
     "author": "Star Conflict SDK",
-    "version": (0, 4, 7),
+    "version": (0, 4, 8),
     "blender": (4, 2, 0),
     "location": "File > Import > Star Conflict model",
     "description": "Star Conflict model import/export (full set: parts, decals, paints)",
@@ -148,6 +148,7 @@ The "FAQ" BUTTON is available here and in the import/export dialogs.
 
 
 # object name -> list of bone indices per vertex (usage 2 from .mdl-msh)
+PART_PLACE_DETAILS = True   # ставить детали в точку кости (галочка в импорте)
 _MESH_BONE_IDX = {}
 # object name -> list of influences per vertex [(bone, weight), …] (usage 2 + usage 1)
 _MESH_INFLUENCES = {}
@@ -3242,6 +3243,9 @@ def _place_part_at_bone(obj, arm_obj, bone_name):
     cx = sum(p.x for p in pts) / len(pts)
     cy = sum(p.y for p in pts) / len(pts)
     cz = sum(p.z for p in pts) / len(pts)
+    if not PART_PLACE_DETAILS:
+        _log("[SC_MODEL_IEX] part %s: оставлена на месте (галочка выключена)" % obj.name)
+        return False
     if (cx * cx + cy * cy + cz * cz) ** 0.5 > 2.0:
         _log("[SC_MODEL_IEX] part %s: геометрия уже в мировых координатах" % obj.name)
         return False
@@ -4269,6 +4273,9 @@ class SC_MODEL_IEX_OT_import_model(bpy.types.Operator, ImportHelper):
     lod: bpy.props.IntProperty(
         name=_L("LOD"), default=0, min=-1, max=9,
         description=_L("-1 — import all levels, 0 — the most detailed one"))
+    move_parts: bpy.props.BoolProperty(
+        name=_L("Move details to bones"), default=False,
+        description=_L("Place details at the attachment bones; turn off to keep them where the geometry is"))
     flip_v: BoolProperty(name=_L("Flip V (as in the game)"), default=True)
     dye_name: StringProperty(
         name=_L("Dye"), default="",
@@ -4368,6 +4375,8 @@ class SC_MODEL_IEX_OT_import_model(bpy.types.Operator, ImportHelper):
         layout.operator(SC_MODEL_IEX_OT_show_faq.bl_idname, icon="QUESTION")
 
     def execute(self, context):
+        global PART_PLACE_DETAILS
+        PART_PLACE_DETAILS = bool(getattr(self, "move_parts", True))
         _fp = bpy.path.abspath(self.filepath)
         if _fp.lower().endswith(".pak"):
             return bpy.ops.sc_model_iex.import_pak_model(
@@ -4482,6 +4491,9 @@ class SC_MODEL_IEX_OT_import_pak(bpy.types.Operator, ImportHelper):
     lod: bpy.props.IntProperty(
         name=_L("LOD"), default=0, min=-1, max=9,
         description=_L("-1 — import all levels, 0 — the most detailed one"))
+    move_parts: bpy.props.BoolProperty(
+        name=_L("Move details to bones"), default=False,
+        description=_L("Place details at the attachment bones; turn off to keep them where the geometry is"))
     flip_v: BoolProperty(name=_L("Flip V (as in the game)"), default=True)
     dye_name: StringProperty(
         name=_L("Dye"), default="",
@@ -4580,6 +4592,8 @@ class SC_MODEL_IEX_OT_import_pak(bpy.types.Operator, ImportHelper):
         layout.operator(SC_MODEL_IEX_OT_show_faq.bl_idname, icon="QUESTION")
 
     def execute(self, context):
+        global PART_PLACE_DETAILS
+        PART_PLACE_DETAILS = bool(getattr(self, "move_parts", True))
         try:
             M, MAT, TEX = _ensure_sc_tools(context)
             from sc_tools import pak as P

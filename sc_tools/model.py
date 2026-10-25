@@ -488,32 +488,38 @@ def _bbox_of_path(mp):
 
 
 def lod_groups(base, verify=True):
-    """Разбиение мешей модели по уровням детализации — по спеке формата.
+    """Уровни детализации: k-я версия каждого материала.
 
-    `.mdl-hdr` +0x20: четыре u16, где lod[k] = ИНДЕКС ПОСЛЕДНЕЙ детали уровня k
-    (включительно), уровни вложенные:
-        LOD0 = детали 0..lod[0], LOD1 = 0..lod[1], ...
-    Все нули — один LOD. Если lod[0] < parts-1, детали после lod[0] —
-    всегда рисуемые attachments (они попадают в каждую группу).
+    В модели деталь хранится в нескольких версиях качества: у материала
+    несколько мешей, упрощающихся по порядку. LOD k — это набор k-х версий всех
+    материалов. Проверено на race1_l_t5_sniper: материал 0 — 39 557 / 21 026 /
+    6 767 / 57 вершин, материалы 1..3 — по две версии; boost — 188 / 94 / 30.
 
     Возвращает [[путь, ...], ...] — группы от самого детального уровня.
     """
     paths = mesh_files(base)
-    hdr = base + ".mdl-hdr"
-    if not os.path.exists(hdr):
+    if not paths:
         return [paths]
-    try:
-        raw = open(hdr, "rb").read()
-        vals = list(struct.unpack_from("<4H", raw, 0x20))
-    except Exception:
+    mats = []
+    for p in paths:
+        try:
+            with open(p, "rb") as fh:
+                head = fh.read(0x44)
+            mats.append(struct.unpack_from("<I", head, 0)[0])
+        except Exception:
+            mats.append(0)
+    by_mat = {}
+    for i, m in enumerate(mats):
+        by_mat.setdefault(m, []).append(i)
+    if not by_mat:
         return [paths]
-    last = [v for v in vals if 0 < v < len(paths)]
-    if not last:
-        return [paths]                     # один LOD
-    if last != sorted(last, reverse=True):
-        return [paths]                     # не монотонно — считаем одним LOD
-    groups = [paths[:v + 1] for v in last]
-    return groups
+    depth = max(len(v) for v in by_mat.values())
+    groups = []
+    for k in range(depth):
+        picks = sorted({v[k] for v in by_mat.values() if len(v) > k})
+        if picks:
+            groups.append([paths[i] for i in picks])
+    return groups or [paths]
 def compose_paint(tex_dir, mats, paint, tex_index=None):
     """
     Покраска корпуса: `_s1` (маска слоёв) x цвета красителей -> «покрашенные» текстуры.
