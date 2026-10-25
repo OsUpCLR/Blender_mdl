@@ -100,8 +100,7 @@ def _action_fcurves(action):
     return out
 
 def export_hdr(mesh_paths, base, out_dir, template_path, mdf_path=None,
-               lod_sizes=None, keep_template_bbox=False, material_count=None,
-               lod_last=None):
+               lod_sizes=None, keep_template_bbox=False, material_count=None):
     """Пересобрать .mdl-hdr: bbox + счётчики mesh_count/material_count.
 
     mesh_count считается по фактическим файлам, material_count — по `.mdf`
@@ -122,7 +121,7 @@ def export_hdr(mesh_paths, base, out_dir, template_path, mdf_path=None,
     if material_count is not None:
         mat = int(material_count)
     data = HW.build_hdr(mesh_paths, template_path or None, material_count=mat,
-                        lod_sizes=lod_sizes, lod_last=lod_last,
+                        lod_sizes=lod_sizes,
                         keep_template_bbox=keep_template_bbox)
     path = os.path.join(out_dir, base + ".mdl-hdr")
     with open(path, "wb") as fh:
@@ -208,13 +207,7 @@ def export_meshes(objects, base, out_dir, template_path, scale=1.0, arm=None,
             # общая часть класса (r4_l_eng и подобные) своего имени не меняет:
             # в игре она подключается по исходному имени, общему для кораблей
             out_base = src_base
-        # LOD в игре: наборы вложенные, детали идут от ГРУБОГО уровня к детальному
-        # (LOD0 содержит все). sc_lod = самый грубый уровень, где деталь есть.
-        # sc_attachment = деталь рисуется всегда (ставится после lod[0], в LOD не входит).
-        lod_objs = [o for o in objs if not o.get("sc_attachment")]
-        attach_objs = [o for o in objs if o.get("sc_attachment")]
-        ordered = sorted(lod_objs, key=lambda o: (-int(o.get("sc_lod", 0)), o.name))
-        ordered += sorted(attach_objs, key=lambda o: o.name)
+        ordered = sorted(objs, key=lambda o: (int(o.get("sc_lod", 0)), o.name))
         lod_sizes = []
         for obj in ordered:
             li = int(obj.get("sc_lod", 0))
@@ -225,19 +218,7 @@ def export_meshes(objects, base, out_dir, template_path, scale=1.0, arm=None,
                               keep_normals=keep_normals, progress=progress)
         src_dir = os.path.dirname(objs[0].get("sc_src_msh") or "")
         src_hdr = os.path.join(src_dir, src_base + ".mdl-hdr")
-        total = len(lod_objs)
-        lvl_count = {}
-        for obj in lod_objs:
-            li = int(obj.get("sc_lod", 0))
-            lvl_count[li] = lvl_count.get(li, 0) + 1
-        lod_last = None
-        if total and any(k > 0 for k in lvl_count):
-            lod_last = [total - 1]
-            remaining = total
-            for k in range(1, 4):
-                remaining -= lvl_count.get(k - 1, 0)
-                lod_last.append(max(0, remaining - 1))
-        result[out_base] = {"files": files, "lod_sizes": lod_sizes, "lod_last": lod_last,
+        result[out_base] = {"files": files, "lod_sizes": lod_sizes,
                             "src_base": src_base,
                             "template": src_hdr if os.path.exists(src_hdr) else None}
     _drop_lod_copies(temps)

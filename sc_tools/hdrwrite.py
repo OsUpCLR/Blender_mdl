@@ -73,17 +73,7 @@ def build(model):
     if "uid" in model:
         u[18] = model["uid"] & 0xFFFFFFFF
     out = bytearray(struct.pack("<20I", *u))
-    if model.get("lod_last"):
-        # Готовый список lod[k] = индекс последней детали уровня (включительно).
-        # Спека: +0x20 — четыре u16, вложенные уровни; (0,0,0,0) — один LOD.
-        vals = [max(0, int(v)) for v in list(model["lod_last"])][:4]
-        vals = (vals + [0, 0, 0, 0])[:4]
-        struct.pack_into("<4H", out, 0x20, *vals)
-        if "thresholds" in model:
-            need = min(3, len([v for v in vals if v > 0]))
-            thr = [float(v) for v in (model.get("thresholds") or [])][:max(need, 0)]
-            struct.pack_into("<3f", out, 0x28, *(thr + [0.0, 0.0, 0.0])[:3])
-    elif model.get("lod_sizes"):
+    if model.get("lod_sizes"):
         # +0x20: внутренние старты по убыванию, добитые нулями (до 4 штук)
         starts, acc = [], 0
         # последняя сумма — это конец последнего LOD (== число мешей), не старт
@@ -170,8 +160,7 @@ def radius_of(mn, mx):
 
 
 def build_hdr(mesh_paths, template=None, material_count=None, mesh_count=None,
-              lod_sizes=None, radius_old=None, keep_template_bbox=False,
-              lod_last=None):
+              lod_sizes=None, radius_old=None, keep_template_bbox=False):
     """Собрать `.mdl-hdr`: bbox по мешам, счётчики — по факту.
 
     template — исходный заголовок: из него берутся неизвестные поля (+0x20,
@@ -203,8 +192,6 @@ def build_hdr(mesh_paths, template=None, material_count=None, mesh_count=None,
     count = len(stats) if mesh_count is None else int(mesh_count)
     mat = model.get("material_count", 0) if material_count is None else int(material_count)
     model["packed"] = ((mat & 0xFFFF) << 16) | (count & 0xFFFF)
-    if lod_last:
-        model["lod_last"] = list(lod_last)
     if lod_sizes:
         model["lod_sizes"] = list(lod_sizes)
         need = len(lod_sizes) - 1

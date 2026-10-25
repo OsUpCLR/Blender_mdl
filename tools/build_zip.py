@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Build a Blender-installable ZIP for SC_MODEL_IEX.
 
 Usage:

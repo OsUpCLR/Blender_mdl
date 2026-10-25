@@ -512,10 +512,7 @@ def lod_groups(base, verify=True):
         return [paths]                     # один LOD
     if last != sorted(last, reverse=True):
         return [paths]                     # не монотонно — считаем одним LOD
-    # детали после lod[0] — attachments: рисуются всегда, входят в каждый уровень
-    base = max(last)
-    tail = paths[base + 1:]
-    groups = [paths[:v + 1] + tail for v in last]
+    groups = [paths[:v + 1] for v in last]
     return groups
 def compose_paint(tex_dir, mats, paint, tex_index=None):
     """

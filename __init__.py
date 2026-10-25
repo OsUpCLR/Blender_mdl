@@ -27,7 +27,7 @@ into the .blend.
 bl_info = {
     "name": "SC Model IEX",
     "author": "Star Conflict SDK",
-    "version": (0, 4, 6),
+    "version": (0, 4, 7),
     "blender": (4, 2, 0),
     "location": "File > Import > Star Conflict model",
     "description": "Star Conflict model import/export (full set: parts, decals, paints)",
@@ -6263,7 +6263,6 @@ class SC_MODEL_IEX_OT_export_mesh_new(bpy.types.Operator):
                         mat_count = None
                 hdr = EX.export_hdr(info["files"], out_base, out, tpl_hdr,
                                     lod_sizes=info["lod_sizes"],
-                                    lod_last=info.get("lod_last"),
                                     keep_template_bbox=unchanged_by_src.get(
                                         info.get("src_base", ""), False),
                                     material_count=mat_count)

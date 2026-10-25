@@ -4,9 +4,6 @@ on:
   push:
   pull_request:
 
-permissions:
-  contents: write
-
 jobs:
   core:
     runs-on: ubuntu-latest
@@ -53,11 +50,3 @@ jobs:
         with:
           name: SC_MODEL_IEX-zip
           path: dist/*.zip
-
-      - name: Publish release (tag v*)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.zip
-          generate_release_notes: true
-          fail_on_unmatched_files: true
