@@ -1,6 +1,6 @@
 # Импорт OBJ-модели в Star Conflict: полный порядок действий
 
-Проверено на двух моделях (Suigintou, вторая модель из `N0R80…zip`).
+Проверено на двух моделях (race3-L и ещё одна модель).
 Тестовая копия: `E:\WorkspaceDSH\Test_SC\star conflict`. Аддон: `E:\SCSDK\Plugins\SC_MODEL_IEX`.
 
 ---
@@ -38,7 +38,7 @@
 
 ```python
 bpy.ops.sc_model_iex.export_sc(
-    base="suigintou", out_dir=OUT,
+    base="myship", out_dir=OUT,
     template=.../race3_l_t1.mdl-msh001,
     hdr_template=.../race3_l_t1.mdl-hdr,
     write_meshes=True, gen_lod=False, write_model=True, write_mdp=True,
@@ -101,7 +101,7 @@ material ship_hull
 
 1. Сложить всё в `out3\_pak\models\ships\race_3\l\`;
 2. `sc_tools.pak.pack_dir(stage, pak)`;
-3. скопировать в `data\models_ships_race_3_l_suigintou.pak`
+3. скопировать в `data\models_ships_race_3_l_myship.pak`
    (перед этим остановить кластер `Hub/Shard/Lobby/DedicatedServer`);
 4. удалить `%LOCALAPPDATA%\Targem\StarConflict\store_cache.dat`;
 5. запустить сервер и клиент.

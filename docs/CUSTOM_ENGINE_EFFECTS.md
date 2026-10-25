@@ -1,6 +1,6 @@
 # Кастомный двигатель в Star Conflict: как сделать, чтобы работали эффекты
 
-Проверено на практике (Suigintou, race3-L). Эффекты держатся **не на модели**, а на
+Проверено на практике (race3-L). Эффекты держатся **не на модели**, а на
 двигательном модуле и костях детали.
 
 ---
@@ -9,18 +9,18 @@
 
 Новый модуль наследует штатный и **обязан иметь имя по шаблону**
 `ModuleEngine_<Раса><Класс>_<Имя>_Mk1`. Если имя не по шаблону — движок молча не
-находит ни звук, ни эффекты (проверено: с `ModuleEngine_Suigintou_Mk1` звука нет,
-с `ModuleEngine_Race3_Large_Suigintou_Mk1` — есть).
+находит ни звук, ни эффекты (проверено: с именем без шаблона звука нет,
+с `ModuleEngine_Race3_Large_myship_Mk1` — есть).
 
 ```lua
 -- def/ex/engine.lua
-Def.ModuleEngine_Race3_Large_Suigintou_Mk1={}
-Def.ModuleEngine_Race3_Large_Suigintou_Mk1.inherit="ModuleEngine_Race3_Large_Mk1"
-Def.ModuleEngine_Race3_Large_Suigintou_Mk1.model="models/ships/race_3/l/suigintou_eng"
-Def.ModuleEngine_Race3_Large_Suigintou_Mk1.boost_model1="models/ships/race_3/l/suigintou_boost"
-Def.ModuleEngine_Race3_Large_Suigintou_Mk1.boost_model_bone1="boost_1"
-Def.ModuleEngine_Race3_Large_Suigintou_Mk1.boost_model2="models/ships/race_3/l/suigintou_boost"
-Def.ModuleEngine_Race3_Large_Suigintou_Mk1.boost_model_bone2="boost_2"
+Def.ModuleEngine_Race3_Large_myship_Mk1={}
+Def.ModuleEngine_Race3_Large_myship_Mk1.inherit="ModuleEngine_Race3_Large_Mk1"
+Def.ModuleEngine_Race3_Large_myship_Mk1.model="models/ships/race_3/l/myship_eng"
+Def.ModuleEngine_Race3_Large_myship_Mk1.boost_model1="models/ships/race_3/l/myship_boost"
+Def.ModuleEngine_Race3_Large_myship_Mk1.boost_model_bone1="boost_1"
+Def.ModuleEngine_Race3_Large_myship_Mk1.boost_model2="models/ships/race_3/l/myship_boost"
+Def.ModuleEngine_Race3_Large_myship_Mk1.boost_model_bone2="boost_2"
 ```
 
 Наследуются (или переопределяются своими путями):
