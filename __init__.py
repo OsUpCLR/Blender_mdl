@@ -27,7 +27,7 @@ into the .blend.
 bl_info = {
     "name": "SC Model IEX",
     "author": "Star Conflict SDK",
-    "version": (0, 4, 4),
+    "version": (0, 4, 5),
     "blender": (4, 2, 0),
     "location": "File > Import > Star Conflict model",
     "description": "Star Conflict model import/export (full set: parts, decals, paints)",
