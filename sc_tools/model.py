@@ -1033,6 +1033,33 @@ def check_counts(base):
                 msgs.append("materials=%d, блоков в .mdf=%d" % (mats, nmat))
         except Exception as exc:
             msgs.append("mdf: %s" % exc)
+    # LOD: +0x20 (границы уровней) и +0x28 (пороги, квадраты дистанций).
+    # Инвариант проверен по всей базе (3046 моделей): число ненулевых значений
+    # в +0x20 равно числу ненулевых порогов; пороги строго убывают, их корни
+    # кратны 0.5 м (единственные исключения — 2.25 = 1.5²).
+    try:
+        lod = _st.unpack_from("<4H", raw, 0x20)
+        thr = _st.unpack_from("<4f", raw, 0x28)
+    except Exception:
+        lod, thr = (0, 0, 0, 0), (0.0, 0.0, 0.0, 0.0)
+    nz_lod = sum(1 for v in lod if v > 0)
+    nz_thr = sum(1 for v in thr if v > 0)
+    if nz_lod != nz_thr:
+        ok = False
+        msgs.append("LOD: уровней с границей %d, порогов %d — должно совпадать"
+                    % (nz_lod, nz_thr))
+    vals = [v for v in thr if v > 0]
+    if all(vals[i] > vals[i + 1] for i in range(len(vals) - 1)) is False:
+        ok = False
+        msgs.append("LOD: пороги не убывают: %s" % [round(v, 1) for v in vals])
+    for v in vals:
+        s = v ** 0.5
+        if abs(s * 2 - round(s * 2)) > 0.02:
+            ok = False
+            msgs.append("LOD: порог %.3f не квадрат кратного 0.5 м (%.3f)" % (v, s))
+    if any(v > len(files) - 1 for v in lod if v > 0):
+        ok = False
+        msgs.append("LOD: граница уровня больше числа деталей-1 (%d)" % (len(files) - 1))
     for path in files:
         try:
             head = open(path, "rb").read(0x44)
@@ -1045,3 +1072,21 @@ def check_counts(base):
         except Exception as exc:
             msgs.append("%s: %s" % (os.path.basename(path), exc))
     return ok, msgs
+
+
+def check_mdf(base, materials_root):
+    """Проверить .mdf модели по правилам пинов из .mmp.
+
+    Возвращает (ok, [сообщения]). materials_root — папка с .mmp/.mmh
+    (например <game>/../SC_Unpacked/materials).
+    """
+    import os as _os
+    from . import mdf_pins as _MP
+    mdf = base + ".mdf"
+    if not _os.path.exists(mdf):
+        return False, ["нет .mdf"]
+    if not _os.path.isdir(materials_root):
+        return False, ["нет папки материалов: %s" % materials_root]
+    classes, base_cond = _MP.collect_conditions(materials_root)
+    problems = _MP.validate_mdf(mdf, classes, base_cond)
+    return (not problems), problems

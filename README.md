@@ -159,3 +159,15 @@ game installation.
 Установка — ZIP через `Edit → Preferences → Add-ons → Install…`.
 Сборка: `python tools/build_zip.py` → `dist/SC_MODEL_IEX-<версия>.zip`.
 Лицензия MIT. Игра и её ассеты не входят в репозиторий.
+
+**Порт из OBJ / FBX / GLB**
+
+* `OBJ -> game meshes` (`sc_model_iex.obj_port`), `FBX/GLB -> game meshes`
+  (`sc_model_iex.fbx_port`): импорт сцены, сварка перед декамацией, разбиение
+  вершин по (вершина + UV), оси GLB -> игра, V-flip, обход DX, нормали из
+  геометрии, тангенты с `w = ±1`, запись `.mdl-msh###` + `.mdl-hdr`;
+* `Normal map -> _nm` (`sc_model_iex.normal_to_tfh`): перекладка в игровую схему
+  (A = X, G = Y, R = AO) с V-переворотом и полной цепочкой мипов;
+* сжатие текстур: `sc_tools.texture.encode_dxt()` -> `bc_encode.encode_best()`
+  (энкодер Targem, затем собственный BC3), сборка пары — `texture.build_pair`
+  с `already_packed=True` и правильными битами `h1` (число мипов в `.tfh`, цветовая).

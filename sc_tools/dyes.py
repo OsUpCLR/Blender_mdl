@@ -56,7 +56,9 @@ _CANON = {
     "specpower": "specPower",
 }
 
-DEFAULT_DYES = (r"C:\Program Files (x86)\Steam\steamapps\common\star conflict"
+_ENV_DATA = os.environ.get("SC_DATA", "")
+DEFAULT_DYES = (os.path.join(_ENV_DATA, "gamedata", "ship_dyes.lua") if _ENV_DATA else "",
+                r"C:\Program Files (x86)\Steam\steamapps\common\star conflict"
                 r"\data\gamedata\ship_dyes.lua")
 
 # где искать таблицу, если путь не задан (в порядке приоритета)

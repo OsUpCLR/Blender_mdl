@@ -27,7 +27,7 @@ into the .blend.
 bl_info = {
     "name": "SC Model IEX",
     "author": "Star Conflict SDK",
-    "version": (0, 4, 8),
+    "version": (0, 4, 9),
     "blender": (4, 2, 0),
     "location": "File > Import > Star Conflict model",
     "description": "Star Conflict model import/export (full set: parts, decals, paints)",
@@ -142,6 +142,18 @@ COLLISIONS (.mdp)
   and the BVH are taken from the .mdp template;
 * the trimesh is one-sided in places — for walls and large
   objects use type 6.
+
+LOD
+* ".mdl-msh###" are model parts, not LOD levels. Each material usually has several
+  quality versions, and LOD k takes the k-th version of every material.
+* Import "LOD": 0 = the most detailed (all parts), 1..3 = coarser, -1 = all levels
+  at once (they overlap). At LOD 0 you always get the whole model: for a ship it is
+  the hull plus _eng/_cap/_boost parts, each with its own LOD0.
+* Export: "LOD: group sizes" (e.g. 4,4,1,1) sets +0x20, "LOD thresholds, m"
+  (e.g. 120,60,40) sets +0x28. Thresholds are the squared distances, far to near;
+  their count must be levels-1, and a single-level model must keep zeros.
+* Rules of thumb: LOD0 = all parts; thresholds around 120/45/15 m are typical for
+  the game, big ships use larger values (Raptor 120/60/40, Gungnir 300/150/50).
 
 The "FAQ" BUTTON is available here and in the import/export dialogs.
 """
@@ -853,6 +865,17 @@ def _build_material(context, MAT, TEX, base_name, mdef, tex_dir, cache_dir,
         tex = nodes.new("ShaderNodeTexImage")
         tex.image = img
         tex.location = (-700, 300 - 250 * len(tex_nodes))
+        if role == "normal":
+            # формат нормали: DXT5 (idx 10/14) — AG-упаковка (A=X, G=Y),
+            # DXT1 (idx 7/11) — RG-упаковка (R=X, G=Y, альфы нет)
+            try:
+                _inf = TEX.parse_tfh(open(tfh, "rb").read())
+                tex["sc_nm_idx"] = int(_inf.get("idx", 10))
+                _log("[SC_MODEL_IEX] normal map format: idx=%s (%s)"
+                     % (_inf.get("idx"), "DXT1 RG" if int(_inf.get("idx", 10)) in (7, 11)
+                        else "DXT5 AG"))
+            except Exception as exc:
+                _log("[SC_MODEL_IEX] normal map format unknown: %s" % exc)
         tex_nodes[role] = tex
 
     # Base Color: _d is the albedo. _s1 (ColormapSampler) is NOT a color but masks
@@ -1122,7 +1145,10 @@ def _build_material(context, MAT, TEX, base_name, mdef, tex_dir, cache_dir,
                         links.new(b, n.inputs[1])
                 return n
 
-            ax = _m("MULTIPLY", normal.outputs["Alpha"], 2.0, (-440, -40), "X*2")
+            _nm_idx = int(normal.get("sc_nm_idx", 10))
+            # DXT1 (7/11) хранит X в красном канале, DXT5 (10/14) — в альфе
+            _x_src = sepn2.outputs[0] if _nm_idx in (7, 11) else normal.outputs["Alpha"]
+            ax = _m("MULTIPLY", _x_src, 2.0, (-440, -40), "X*2")
             ax2 = _m("SUBTRACT", ax.outputs[0], 1.0, (-300, -40), "X-1")
             sqx = _m("MULTIPLY", ax2.outputs[0], ax2.outputs[0], (-160, -40), "X^2")
             gy = _m("MULTIPLY", sepn2.outputs[1], 2.0, (-440, -140), "Y*2")
@@ -6275,8 +6301,16 @@ class SC_MODEL_IEX_OT_export_mesh_new(bpy.types.Operator):
                         mat_count = len(_MAT.parse_mdf(cand_mdf))
                     except Exception:
                         mat_count = None
+                _thr = None
+                _mt = getattr(self, "lod_meters", "") or ""
+                if _mt.strip():
+                    try:
+                        _thr = [float(v) for v in _mt.replace(";", ",").split(",") if v.strip()]
+                    except ValueError:
+                        _thr = None
                 hdr = EX.export_hdr(info["files"], out_base, out, tpl_hdr,
-                                    lod_sizes=info["lod_sizes"],
+                                    lod_sizes=info["lod_sizes"], thresholds_m=_thr,
+                                    lod_last=info.get("lod_last"),
                                     keep_template_bbox=unchanged_by_src.get(
                                         info.get("src_base", ""), False),
                                     material_count=mat_count)
@@ -6389,6 +6423,9 @@ class SC_MODEL_IEX_OT_export_hdr(bpy.types.Operator):
     mdf: bpy.props.StringProperty(
         name=_L(".mdf (optional)"), subtype="FILE_PATH", default="",
         description=_L("material_count for +0x38 is taken from it; without it — from the template"))
+    lod_meters: bpy.props.StringProperty(
+        name=_L("LOD thresholds, m"),
+        description=_L("Comma separated distances in meters, far to near, e.g. 120,60,40"))
 
     def execute(self, context):
         from sc_tools import hdrwrite as HW
@@ -6417,8 +6454,20 @@ class SC_MODEL_IEX_OT_export_hdr(bpy.types.Operator):
                     mat = len(MAT.parse_mdf(mdf))
                 except Exception:
                     mat = None
+            thresholds_m = None
+            if self.lod_meters.strip():
+                try:
+                    thresholds_m = [float(v) for v in
+                                    self.lod_meters.replace(";", ",").split(",") if v.strip()]
+                except ValueError:
+                    thresholds_m = None
+            if thresholds_m and lod_sizes and len(thresholds_m) > len(lod_sizes) - 1:
+                _log("[SC_MODEL_IEX] порогов %d больше, чем уровней-1 (%d) — лишние отброшены"
+                     % (len(thresholds_m), len(lod_sizes) - 1))
+                thresholds_m = thresholds_m[:len(lod_sizes) - 1]
             data = HW.build_hdr(files, bpy.path.abspath(self.template) or None,
-                                material_count=mat, lod_sizes=lod_sizes)
+                                material_count=mat, lod_sizes=lod_sizes,
+                                thresholds_m=thresholds_m)
             os.makedirs(out, exist_ok=True)
             path = os.path.join(out, self.base + ".mdl-hdr")
             with open(path, "wb") as fh:
@@ -7116,7 +7165,7 @@ class SC_MODEL_IEX_OT_obj_to_game(bpy.types.Operator):
     filepath: bpy.props.StringProperty(name="OBJ", subtype="FILE_PATH")
     base: bpy.props.StringProperty(name="Имя модели", default="model")
     template_dir: bpy.props.StringProperty(name="Шаблон (папка)", subtype="DIR_PATH",
-                                           default=r"E:\SC_Unpacked\models\ships\race_3\l")
+                                           default="")
     out_dir: bpy.props.StringProperty(name="Куда сохранить", subtype="DIR_PATH")
     target_len: bpy.props.FloatProperty(name="Длина модели", default=5.5, min=0.1)
     install: bpy.props.BoolProperty(name="Установить в игру", default=False)
@@ -7287,6 +7336,241 @@ class SC_MODEL_IEX_OT_rotate_selected(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class SC_MODEL_IEX_OT_normal_to_tfh(bpy.types.Operator):
+    """Обычная карта нормалей (+AO) -> игровая DXT5nm (.tfh/.tfd)"""
+    bl_idname = "sc_model_iex.normal_to_tfh"
+    bl_label = "Normal -> DXT5nm (.tfh/.tfd)"
+    bl_options = {"REGISTER"}
+
+    filepath: bpy.props.StringProperty(
+        name="Normal map", subtype="FILE_PATH",
+        description="Обычная tangent-space нормаль: X в R, Y в G, Z в B")
+    ao: bpy.props.StringProperty(
+        name="AO (optional)", subtype="FILE_PATH",
+        description="Серая карта затенения — попадёт в красный канал")
+    out_dir: bpy.props.StringProperty(name="Куда", subtype="DIR_PATH")
+    name: bpy.props.StringProperty(name="Имя", description="Без расширения; по умолчанию имя файла")
+    flip_x: bpy.props.BoolProperty(name="Инвертировать X", default=False)
+    flip_y: bpy.props.BoolProperty(name="Инвертировать Y", default=False)
+    ao_level: bpy.props.FloatProperty(name="AO по умолчанию", default=1.0, min=0.0, max=1.0,
+                                      description="Значение красного канала, если AO не задан")
+
+    def _load(self, path):
+        import numpy as np
+        img = bpy.data.images.load(bpy.path.abspath(path), check_existing=False)
+        w, h = img.size
+        px = np.array(img.pixels[:], dtype=np.float32).reshape(h, w, 4)
+        bpy.data.images.remove(img)
+        return w, h, px
+
+    def execute(self, context):
+        import numpy as np
+        from .sc_tools import texture as TEX
+        from .sc_tools import dxt_encode as DXT
+        try:
+            w, h, npx = self._load(self.filepath)
+            x = npx[:, :, 0] * 2.0 - 1.0
+            y = npx[:, :, 1] * 2.0 - 1.0
+            if self.flip_x:
+                x = -x
+            if self.flip_y:
+                y = -y
+            if self.ao:
+                aw, ah, apx = self._load(self.ao)
+                ao = apx[:, :, 0]
+                if (aw, ah) != (w, h):
+                    yi = (np.arange(h) * ah // max(1, h)).clip(0, ah - 1)
+                    xi = (np.arange(w) * aw // max(1, w)).clip(0, aw - 1)
+                    ao = ao[yi][:, xi]
+            else:
+                ao = np.full((h, w), float(self.ao_level), dtype=np.float32)
+
+            px = np.empty((h, w, 4), dtype=np.float32)
+            px[:, :, 0] = ao                                   # R = AO
+            px[:, :, 1] = y * 0.5 + 0.5                        # G = Y
+            px[:, :, 2] = 1.0                                  # B = не используется
+            px[:, :, 3] = x * 0.5 + 0.5                        # A = X
+            arr = np.clip(px * 255.0, 0, 255).astype(np.uint8)
+
+            levels = []
+            cur = arr
+            while True:
+                ch, cw, _ = cur.shape
+                levels.append((cw, ch, DXT.encode(cur.tobytes(), cw, ch, "DXT5")))
+                if cw == 1 and ch == 1:
+                    break
+                nh, nw = max(1, ch // 2), max(1, cw // 2)
+                a = cur[:nh*2, :nw*2].astype(np.uint16)
+                cur = a.reshape(nh, 2, nw, 2, 4).mean(axis=(1, 3)).astype(np.uint8)
+
+            # опорные поля — от любой игровой _nm, если найдётся; иначе нули
+            ref = {"h0": 0, "h1": 0}
+            try:
+                import glob
+                game = bpy.path.abspath(getattr(_addon_prefs(context), "game_root", "") or "")
+                for cand in (os.path.join(game, ".."),):
+                    pass
+            except Exception:
+                pass
+            tfh, tfd = TEX.build_pair(levels, w, h, 10, cube=False,
+                                      n_tfh=min(6, max(0, len(levels) - 1)),
+                                      h0_extra=ref["h0"], h1_extra=ref["h1"],
+                                      already_packed=True)
+            out = bpy.path.abspath(self.out_dir) or os.path.dirname(bpy.path.abspath(self.filepath))
+            base = self.name or os.path.splitext(os.path.basename(bpy.path.abspath(self.filepath)))[0]
+            open(os.path.join(out, base + ".tfh"), "wb").write(tfh)
+            open(os.path.join(out, base + ".tfd"), "wb").write(tfd)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "%s.tfh/.tfd: %dx%d, мипов %d" % (base, w, h, len(levels)))
+        return {"FINISHED"}
+
+
+
+
+class SC_MODEL_IEX_OT_fbx_port(bpy.types.Operator):
+    """FBX или GLB -> игровые меши (те же правила порта, что и для OBJ)"""
+    bl_idname = "sc_model_iex.fbx_port"
+    bl_label = "FBX / GLB -> меши (точный порт)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filepath: bpy.props.StringProperty(name="FBX/GLB", subtype="FILE_PATH")
+    template: bpy.props.StringProperty(name="Шаблон .mdl-msh", subtype="FILE_PATH")
+    hdr_template: bpy.props.StringProperty(name="Шаблон .mdl-hdr (необязательно)",
+                                          subtype="FILE_PATH")
+    out_dir: bpy.props.StringProperty(name="Куда", subtype="DIR_PATH")
+    base: bpy.props.StringProperty(name="Имя модели", default="model")
+    scale: bpy.props.FloatProperty(name="Масштаб", default=1.0)
+    rotate_y180: bpy.props.BoolProperty(name="Поворот 180 по Y", default=True)
+    flip_v: bpy.props.BoolProperty(name="V-flip UV", default=True)
+    flip_winding: bpy.props.BoolProperty(name="Перевернуть обход (DX)", default=True)
+
+    def execute(self, context):
+        import numpy as _np
+        from .sc_tools import obj2msh, hdrwrite as HW
+        try:
+            src = bpy.path.abspath(self.filepath)
+            out = bpy.path.abspath(self.out_dir) or bpy.path.abspath("//")
+            os.makedirs(out, exist_ok=True)
+            before = set(bpy.data.objects)
+            low = src.lower()
+            if low.endswith(".glb") or low.endswith(".gltf"):
+                bpy.ops.import_scene.gltf(filepath=src)
+            else:
+                bpy.ops.import_scene.fbx(filepath=src)
+            objs = [o for o in bpy.data.objects if o not in before and o.type == "MESH"]
+            if not objs:
+                raise RuntimeError("в файле нет мешей")
+            verts = []
+            uv = []
+            faces = []
+            tids = []
+            mat_ids = []
+            mat_names = []
+            for obj in objs:
+                me = obj.data
+                me.calc_loop_triangles()
+                base_index = len(verts)
+                loop_base = len(uv)
+                for v in me.vertices:
+                    co = obj.matrix_world @ v.co
+                    verts.append((co.x, co.y, co.z))
+                uvl = me.uv_layers.active
+                if uvl:
+                    for d in uvl.data:
+                        uv.append((d.uv[0], d.uv[1]))
+                else:
+                    for _ in range(len(me.loops)):
+                        uv.append((0.0, 0.0))
+                local_names = []
+                for m in me.materials:
+                    name = m.name if m else "material"
+                    if name not in mat_names:
+                        mat_names.append(name)
+                    local_names.append(mat_names.index(name))
+                for tri in me.loop_triangles:
+                    faces.append(tuple(base_index + i for i in tri.vertices))
+                    tids.append(tuple(loop_base + i for i in tri.loops))
+                    poly = me.polygons[tri.polygon_index]
+                    mat_ids.append(local_names[poly.material_index] if local_names else 0)
+            built = obj2msh.build_from_arrays(verts, uv, faces, tids, mat_ids, mat_names,
+                                              scale=self.scale,
+                                              rotate_y180=self.rotate_y180,
+                                              flip_v=self.flip_v,
+                                              flip_winding=self.flip_winding)
+            made = []
+            for index, (name, pos, nrm, tang, uvs_, fs) in enumerate(built):
+                path = os.path.join(out, "%s.mdl-msh%03d" % (self.base, index))
+                nv, nt = obj2msh.write_msh(bpy.path.abspath(self.template), path,
+                                           pos, nrm, tang, uvs_, fs, material_index=index)
+                made.append((path, nv, nt, name))
+            if not made:
+                raise RuntimeError("не удалось собрать ни одного меша")
+            msg = "мешей %d: %s" % (len(made), ", ".join(
+                "%s(%d в)" % (os.path.basename(p_), nv) for p_, nv, _nt, _n in made))
+            tpl_hdr = bpy.path.abspath(self.hdr_template)
+            if tpl_hdr and os.path.exists(tpl_hdr):
+                data = HW.build_hdr([p_ for p_, _a, _b, _c in made], tpl_hdr,
+                                    material_count=len(made))
+                hdr_path = os.path.join(out, self.base + ".mdl-hdr")
+                with open(hdr_path, "wb") as fh:
+                    fh.write(data)
+                msg += "; hdr: %s" % os.path.basename(hdr_path)
+            self.report({"INFO"}, msg)
+            return {"FINISHED"}
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+
+class SC_MODEL_IEX_OT_obj_port(bpy.types.Operator):
+    """OBJ -> игровые меши по проверенному правилу порта (без сварки UV-швов)"""
+    bl_idname = "sc_model_iex.obj_port"
+    bl_label = "OBJ -> меши (точный порт)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filepath: bpy.props.StringProperty(name="OBJ", subtype="FILE_PATH")
+    template: bpy.props.StringProperty(name="Шаблон .mdl-msh", subtype="FILE_PATH")
+    hdr_template: bpy.props.StringProperty(name="Шаблон .mdl-hdr (необязательно)",
+                                          subtype="FILE_PATH")
+    out_dir: bpy.props.StringProperty(name="Куда", subtype="DIR_PATH")
+    base: bpy.props.StringProperty(name="Имя модели", default="model")
+    scale: bpy.props.FloatProperty(name="Масштаб", default=1.0)
+    rotate_y180: bpy.props.BoolProperty(name="Поворот 180 по Y", default=True)
+    flip_v: bpy.props.BoolProperty(name="V-flip UV", default=True)
+    flip_winding: bpy.props.BoolProperty(name="Перевернуть обход (DX)", default=True)
+
+    def execute(self, context):
+        from .sc_tools import obj2msh
+        try:
+            out = bpy.path.abspath(self.out_dir) or bpy.path.abspath("//")
+            os.makedirs(out, exist_ok=True)
+            made = obj2msh.convert(bpy.path.abspath(self.filepath),
+                                   bpy.path.abspath(self.template), out,
+                                   base=self.base, scale=self.scale,
+                                   rotate_y180=self.rotate_y180,
+                                   flip_v=self.flip_v, flip_winding=self.flip_winding)
+            if not made:
+                raise RuntimeError("в OBJ нет граней")
+            msg = "мешей %d: %s" % (len(made), ", ".join(
+                "%s(%d в)" % (os.path.basename(p_), nv) for p_, nv, _nt, _n in made))
+            tpl_hdr = bpy.path.abspath(self.hdr_template)
+            if tpl_hdr and os.path.exists(tpl_hdr):
+                from .sc_tools import hdrwrite as HW
+                files = [p_ for p_, _nv, _nt, _n in made]
+                data = HW.build_hdr(files, tpl_hdr, material_count=len(made))
+                hdr_path = os.path.join(out, self.base + ".mdl-hdr")
+                with open(hdr_path, "wb") as fh:
+                    fh.write(data)
+                msg += "; hdr: %s" % os.path.basename(hdr_path)
+            self.report({"INFO"}, msg)
+            return {"FINISHED"}
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+
 CLASSES = (SC_MODEL_IEX_OT_import_model, SC_MODEL_IEX_OT_import_batch,
            SC_MODEL_IEX_OT_import_mdp, SC_MODEL_IEX_OT_mdp_scale,
            SC_MODEL_IEX_OT_import_pak, SC_MODEL_IEX_OT_import_anim,
@@ -7299,7 +7583,7 @@ CLASSES = (SC_MODEL_IEX_OT_import_model, SC_MODEL_IEX_OT_import_batch,
            SC_MODEL_IEX_OT_export_all,
            SC_MODEL_IEX_OT_export_model, SC_MODEL_IEX_OT_pick_export_dir,
            SC_MODEL_IEX_OT_game_lighting, SC_MODEL_IEX_OT_show_faq,
-           SC_MODEL_IEX_OT_reload_tools, SC_MODEL_IEX_Prefs, SC_MODEL_IEX_OT_obj_to_game, SC_MODEL_IEX_OT_dds_to_tfh, SC_MODEL_IEX_OT_obj_to_msh, SC_MODEL_IEX_OT_rotate_selected)
+           SC_MODEL_IEX_OT_reload_tools, SC_MODEL_IEX_Prefs, SC_MODEL_IEX_OT_obj_to_game, SC_MODEL_IEX_OT_dds_to_tfh, SC_MODEL_IEX_OT_obj_to_msh, SC_MODEL_IEX_OT_rotate_selected, SC_MODEL_IEX_OT_normal_to_tfh, SC_MODEL_IEX_OT_obj_port, SC_MODEL_IEX_OT_fbx_port)
 def register():
     _check_blender_version()
     for cls in CLASSES:

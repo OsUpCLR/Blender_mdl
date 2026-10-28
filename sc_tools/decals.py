@@ -44,7 +44,9 @@ _RE_LUA_ENTRY = re.compile(r"^\s*ShipDecals\.(Token|Vinyl)\.([A-Za-z0-9_\-]+)\s*
 _RE_LUA_PROP = re.compile(r'^\s*(albedo|spec|bump|glow)\s*=\s*"([^"]+)"', re.I)
 _RE_LUA_FLAG = re.compile(r"^\s*([A-Za-z_]+)\s*=\s*(true|false)\s*$")
 
-DEFAULT_DAT = r"C:\Program Files (x86)\Steam\steamapps\common\star conflict\data\gamedata\decals.dat"
+_ENV_DATA = os.environ.get("SC_DATA", "")
+DEFAULT_DAT = (os.path.join(_ENV_DATA, "gamedata", "decals.dat") if _ENV_DATA else
+               r"C:\Program Files (x86)\Steam\steamapps\common\star conflict\data\gamedata\decals.dat")
 DEFAULT_SHIP_DECALS = (r"C:\Program Files (x86)\Steam\steamapps\common\star conflict"
                        r"\data\gamedata\ship_decals.lua")
 

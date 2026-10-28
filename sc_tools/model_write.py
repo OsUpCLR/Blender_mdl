@@ -58,12 +58,21 @@ def build_mdf(materials, tex_root=""):
         out.append("{")
         for sampler, path in sorted(samplers.items()):
             out.append('\t%s "%s"' % (sampler, path))
-        # паттерны корабля требуют pins/UserParam2, иначе материал "not bound"
-        if name.split(".")[0] in SHIP_PATTERNS:
-            out.append("\tUserParam2_Float4 ( 1 1 0 0 )")
+        # типовые pins/UserParam2 берём из игровой статистики по классу
+        cls = name.split(".")[0]
+        try:
+            from . import mdf_pins as _MP
+            d = _MP.class_defaults(cls)
+        except Exception:
+            d = {"pins": [], "up2": None}
+        if d.get("up2"):
+            out.append("\tUserParam2_Float4 ( %g %g %g %g )" % tuple(d["up2"]))
+        pins = d.get("pins") or []
+        if pins:
             out.append("\tpins")
             out.append("\t{")
-            out.append("\t\tUser1 1")
+            for num, val in pins:
+                out.append("\t\tUser%d %d" % (num, val))
             out.append("\t}")
         out.append("}")
         out.append("")

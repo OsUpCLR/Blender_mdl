@@ -595,3 +595,14 @@ def alpha_mask_stats(tfh_path, tfd_path=None):
     if not cnt:
         return None
     return dict(mean=total // cnt, frac=hi / cnt, mips=info["mips"], fmt=info["idx"])
+
+def encode_dxt(rgba, w, h, fmt="DXT5"):
+    """Сжать RGBA-пиксели в DXT (BC1/BC3) лучшим доступным энкодером.
+
+    rgba — bytes или numpy-массив (h*w*4). Возвращает сжатые данные для
+    build_pair(levels=[(w, h, data)], ..., already_packed=True).
+    """
+    from . import bc_encode as _BC
+    import numpy as _np
+    arr = _np.asarray(rgba, dtype=_np.uint8).reshape(h, w, 4)
+    return _BC.encode_best(arr, fmt)

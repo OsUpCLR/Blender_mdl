@@ -100,7 +100,8 @@ def _action_fcurves(action):
     return out
 
 def export_hdr(mesh_paths, base, out_dir, template_path, mdf_path=None,
-               lod_sizes=None, keep_template_bbox=False, material_count=None):
+               lod_sizes=None, keep_template_bbox=False, material_count=None,
+               thresholds_m=None, lod_last=None):
     """Пересобрать .mdl-hdr: bbox + счётчики mesh_count/material_count.
 
     mesh_count считается по фактическим файлам, material_count — по `.mdf`
@@ -122,7 +123,8 @@ def export_hdr(mesh_paths, base, out_dir, template_path, mdf_path=None,
         mat = int(material_count)
     data = HW.build_hdr(mesh_paths, template_path or None, material_count=mat,
                         lod_sizes=lod_sizes,
-                        keep_template_bbox=keep_template_bbox)
+                        keep_template_bbox=keep_template_bbox,
+                        thresholds_m=thresholds_m, lod_last=lod_last)
     path = os.path.join(out_dir, base + ".mdl-hdr")
     with open(path, "wb") as fh:
         fh.write(data)
@@ -142,6 +144,23 @@ def _lod_copy(obj, ratio, lod):
             except Exception:
                 pass
     ob["sc_lod"] = int(lod)
+    # ВАЖНО: игровые меши приходят с несваренными вершинами (швы UV/жёсткие рёбра).
+    # Decimate на таком меше захлёбывается (22 445 вершин → >10 минут), после сварки
+    # дублей (1e-4) — доли секунды. LOD0 не трогаем, сварка только в копии.
+    try:
+        import bmesh as _bm
+        bm = _bm.new()
+        bm.from_mesh(me)
+        before = len(bm.verts)
+        _bm.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
+        bm.to_mesh(me)
+        bm.free()
+        me.update()
+        if before > len(me.vertices):
+            print("[SC_MODEL_IEX] LOD%d %s: сварка %d -> %d вершин"
+                  % (lod, obj.name, before, len(me.vertices)))
+    except Exception as exc:
+        print("[SC_MODEL_IEX] LOD%d %s: сварка не удалась: %s" % (lod, obj.name, exc))
     try:
         mod = ob.modifiers.new("dec", "DECIMATE")
         mod.ratio = float(ratio)
@@ -177,7 +196,8 @@ def export_meshes(objects, base, out_dir, template_path, scale=1.0, arm=None,
     objects = list(objects)
     if lod_levels:
         # авто-LOD: ужимаем LOD0 и добавляем уровни 1..N
-        ratios = (0.5, 0.25, 0.12, 0.06)
+        # пропорции по игровым моделям: 39 557 → 21 026 → 6 767 → 57 вершин
+        ratios = (0.53, 0.17, 0.002, 0.001)
         lod0 = [o for o in objects if int(o.get("sc_lod", 0)) == 0]
         for lvl in range(1, int(lod_levels) + 1):
             ratio = ratios[min(lvl - 1, len(ratios) - 1)]
@@ -207,18 +227,32 @@ def export_meshes(objects, base, out_dir, template_path, scale=1.0, arm=None,
             # общая часть класса (r4_l_eng и подобные) своего имени не меняет:
             # в игре она подключается по исходному имени, общему для кораблей
             out_base = src_base
-        ordered = sorted(objs, key=lambda o: (int(o.get("sc_lod", 0)), o.name))
+        # в игре детали идут от ГРУБОГО уровня к детальному, наборы вложенные
+        ordered = sorted(objs, key=lambda o: (-int(o.get("sc_lod", 0)), o.name))
         lod_sizes = []
         for obj in ordered:
             li = int(obj.get("sc_lod", 0))
             while len(lod_sizes) <= li:
                 lod_sizes.append(0)
             lod_sizes[li] += 1
+        # lod_last[k] = индекс последней детали уровня k (включительно)
+        total = len(ordered)
+        lvl_count = {}
+        for obj in ordered:
+            li = int(obj.get("sc_lod", 0))
+            lvl_count[li] = lvl_count.get(li, 0) + 1
+        lod_last = None
+        if total and any(k > 0 for k in lvl_count):
+            lod_last = [total - 1]
+            remaining = total
+            for k in range(1, 4):
+                remaining -= lvl_count.get(k - 1, 0)
+                lod_last.append(max(0, remaining - 1))
         files = _write_meshes(ordered, tpl, out_base, out_dir, scale, arm,
                               keep_normals=keep_normals, progress=progress)
         src_dir = os.path.dirname(objs[0].get("sc_src_msh") or "")
         src_hdr = os.path.join(src_dir, src_base + ".mdl-hdr")
-        result[out_base] = {"files": files, "lod_sizes": lod_sizes,
+        result[out_base] = {"files": files, "lod_sizes": lod_sizes, "lod_last": lod_last,
                             "src_base": src_base,
                             "template": src_hdr if os.path.exists(src_hdr) else None}
     _drop_lod_copies(temps)

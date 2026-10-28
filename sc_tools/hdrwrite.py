@@ -73,7 +73,17 @@ def build(model):
     if "uid" in model:
         u[18] = model["uid"] & 0xFFFFFFFF
     out = bytearray(struct.pack("<20I", *u))
-    if model.get("lod_sizes"):
+    if model.get("lod_last"):
+        vals = [max(0, int(v)) for v in list(model["lod_last"])][:4]
+        vals = (vals + [0, 0, 0, 0])[:4]
+        struct.pack_into("<4H", out, 0x20, *vals)
+
+    if model.get("thresholds_explicit") is not None:
+        # явные пороги (квадраты дистанций) — пишем как есть, +0x20 не трогаем
+        sq = [float(v) for v in model["thresholds_explicit"]][:4]
+        sq = (sq + [0.0, 0.0, 0.0, 0.0])[:4]
+        struct.pack_into("<4f", out, 0x28, *sq)
+    elif model.get("lod_sizes"):
         # +0x20: внутренние старты по убыванию, добитые нулями (до 4 штук)
         starts, acc = [], 0
         # последняя сумма — это конец последнего LOD (== число мешей), не старт
@@ -160,7 +170,8 @@ def radius_of(mn, mx):
 
 
 def build_hdr(mesh_paths, template=None, material_count=None, mesh_count=None,
-              lod_sizes=None, radius_old=None, keep_template_bbox=False):
+              lod_sizes=None, radius_old=None, keep_template_bbox=False,
+              thresholds_m=None, lod_last=None):
     """Собрать `.mdl-hdr`: bbox по мешам, счётчики — по факту.
 
     template — исходный заголовок: из него берутся неизвестные поля (+0x20,
@@ -192,6 +203,26 @@ def build_hdr(mesh_paths, template=None, material_count=None, mesh_count=None,
     count = len(stats) if mesh_count is None else int(mesh_count)
     mat = model.get("material_count", 0) if material_count is None else int(material_count)
     model["packed"] = ((mat & 0xFFFF) << 16) | (count & 0xFFFF)
+    if lod_last:
+        model["lod_last"] = list(lod_last)
+        if thresholds_m is None:
+            n = sum(1 for v in list(lod_last)[:4] if v > 0)
+            if n >= 1:
+                r = radius_of(mn, mx)
+                # округляем до 0.5 м: в игре корни порогов кратны 0.5
+                def _half(v):
+                    return max(0.5, round(v * 2.0) / 2.0)
+                thr = [_half(r * 22.0)]
+                for _k in range(3):
+                    thr.append(_half(thr[-1] / 2.2))
+                thresholds_m = thr[:min(3, max(1, n))]
+    if thresholds_m is not None:
+        # пороги заданы в МЕТРАХ, дальний -> ближний; в файле — квадраты дистанций
+        meters = [max(0.5, round(float(v) * 2.0) / 2.0) for v in thresholds_m
+                  if float(v) > 0]
+        meters.sort(reverse=True)
+        squares = [round(m * m) for m in meters][:4]
+        model["thresholds_explicit"] = squares + [0] * (4 - len(squares))
     if lod_sizes:
         model["lod_sizes"] = list(lod_sizes)
         need = len(lod_sizes) - 1
@@ -202,13 +233,14 @@ def build_hdr(mesh_paths, template=None, material_count=None, mesh_count=None,
         elif need:
             thr = list(tmpl_thr)
             if not thr:
-                # медиана по корпусу (1263 модели): sqrt(порог)/радиус ~ 119
-                thr = [(radius_of(mn, mx) * 118.9) ** 2]
+                # калибровка по игровым моделям: thr0 ≈ 22 × radius (медиана
+                # отношения 20.2…48.9), прежний коэффициент 118.9 завышал в 2.4–5.9 раза
+                thr = [(radius_of(mn, mx) * 22.0) ** 2]
             last = thr[-1]
             while len(thr) < need:
-                # медиана отношения соседних порогов (в дистанциях) ~0.4,
-                # то есть в квадратах — 0.16
-                last = last * 0.16
+                # шаг между уровнями в игре ≈ 2.2 раза в дистанциях
+                # (Raptor 120/60/40, Gungnir 300/150/50), в квадратах 1/2.2²
+                last = last / (2.2 ** 2)
                 thr.append(last)
         else:
             thr = []
